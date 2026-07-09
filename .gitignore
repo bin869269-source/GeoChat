@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+map.html
+map.png
+map.pdf
+map_temp.html
+map_temp.png
+.DS_Store
+.vscode/
