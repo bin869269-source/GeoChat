@@ -1035,45 +1035,26 @@ def validate_intent_with_rules(original_text: str, normalized_text: str, llm_res
     except Exception:
         confidence = 0.0
 
-    parameter_signals = [
-        "parameter",
-        "parametern",
-        "layer-parameter",
-        "layer parameter",
-        "darstellungsparameter",
-        "kartenparameter",
-        "einstellungen",
-        "einstellbare",
-        "einstellbare parameter",
+    # Parameterfragen werden nur erkannt, wenn der Nutzer wirklich fragt.
+    # Einzelne Wörter wie "Transparenz", "Farbe" oder "opacity" reichen NICHT mehr aus.
+    parameter_question_patterns = [
         "welche parameter",
         "welche einstellungen",
+        "welche darstellungsparameter",
         "welche parameter hat",
         "welche einstellungen hat",
         "was kann ich ändern",
         "was kann ich aendern",
         "was kann ich anpassen",
         "welche werte kann ich anpassen",
-        "farbe und transparenz",
-        "farbe oder transparenz",
-        "füllfarbe",
-        "fuellfarbe",
-        "randfarbe",
-        "transparenz",
-        "deckkraft",
-        "opacity",
-        "fillopacity",
-        "linienbreite",
-        "linienstärke",
-        "linienstaerke",
-        "randstärke",
-        "randstaerke",
-        "radius",
-        "blur",
-        "unschärfe",
-        "unschaerfe"
+        "welche parameter kann ich ändern",
+        "welche parameter kann ich aendern",
+        "welche parameter kann ich anpassen",
+        
     ]
 
-    style_change_signals = [
+    # Konkrete Stiländerungen. Diese sollen Vorrang vor Parameterfragen haben.
+    style_action_patterns = [
         "ändere",
         "aendere",
         "setze",
@@ -1082,17 +1063,26 @@ def validate_intent_with_rules(original_text: str, normalized_text: str, llm_res
         "erhöhe",
         "erhoehe",
         "reduziere",
-        "verringere"
+        "verringere",
+
     ]
 
-    if any(signal in combined_text for signal in parameter_signals):
-        if not any(signal in combined_text for signal in style_change_signals):
-            return {
-                "tool": "Layer_Parameter_anzeigen",
-                "confidence": max(confidence, 0.85),
-                "reason": "Validierung: Parameterabfrage erkannt."
-            }
+    has_parameter_question = any(pattern in combined_text for pattern in parameter_question_patterns)
+    has_style_action = any(pattern in combined_text for pattern in style_action_patterns)
 
+    if has_parameter_question and not has_style_action:
+        return {
+            "tool": "Layer_Parameter_anzeigen",
+            "confidence": max(confidence, 0.85),
+            "reason": "Validierung: echte Parameterfrage erkannt."
+        }
+
+    if has_style_action and tool == "Layer_Parameter_anzeigen":
+        return {
+            "tool": "Kartenstil_anpassen",
+            "confidence": max(confidence, 0.85),
+            "reason": "Validierung: konkrete Stiländerung statt Parameterfrage erkannt."
+        }
 
     # Spatial Analysis ist spezifischer als normale Kartenerstellung.
     spatial_signals = [
@@ -1161,10 +1151,34 @@ def parse_intent(text: str):
         "tool": final_result.get("tool", "error")
     }
 
-def get_selected_layer_name(user_text: str,layers):
+def get_layer_by_number_from_text(user_text: str, layers):
     """
-    Bestimmen den Ziellayer
+    Detects explicit layer numbers such as 'Layer 2' or 'Datei 2'.
+    Direct layer-number references have priority over LLM-based layer selection.
     """
+
+    text = user_text.lower()
+
+    match = re.search(r"(?:layer|datei)\s*(\d+)", text)
+
+    if not match:
+        return None
+
+    index = int(match.group(1)) - 1
+
+    if 0 <= index < len(layers):
+        return layers[index]["name"]
+
+    return None
+
+def get_selected_layer_name(user_text: str, layers):
+    """
+    Determines the target layer.
+    """
+
+    direct_layer_name = get_layer_by_number_from_text(user_text, layers)
+    if direct_layer_name:
+        return direct_layer_name
 
     layer_names = "\n".join([l["name"] for l in layers])
     system_prompt = f"""
@@ -1310,6 +1324,47 @@ SUPPORTED_MAP_TYPES = [
 #     "choropleth": "für Polygondaten mit numerischen Attributen"
 # }
 
+def validate_kartentyp_result(user_text: str, layer: dict, result: dict) -> dict:
+    """
+    Korrigiert nur klare Kartentyp-Konflikte.
+    Wenige Regeln:
+    - Polygon/GeoJSON/Line ohne ausdrückliche thematische Anforderung => geojson
+    - Choropleth nur bei ausdrücklichem Choropleth oder 'nach <Attribut>'
+    """
+
+    text = user_text.lower()
+    layer_type = layer.get("type", "")
+
+    explicitly_choropleth = (
+        "choropleth" in text
+        or "choroplethen" in text
+        or "choroplehten" in text
+        or "thematische karte" in text
+        or re.search(r"\bnach\s+[\wäöüß_]+", text) is not None
+    )
+
+    explicitly_normal = (
+        "normale karte" in text
+        or "normale flächenkarte" in text
+        or "normale flaechenkarte" in text
+        or "polygonkarte" in text
+        or "polygon karte" in text
+        or "flächenkarte" in text
+        or "flaechenkarte" in text
+    )
+
+    if layer_type in ["polygon", "geojson", "line"]:
+        if explicitly_normal:
+            result["type"] = "geojson"
+            result["data_field"] = None
+
+        elif result.get("type") == "choropleth" and not explicitly_choropleth:
+            result["type"] = "geojson"
+            result["data_field"] = None
+
+    return result
+
+
 def bestimmen_Kartentyp(user_text: str, layer) -> dict:
     system_prompt = """
     Du bist ein Senior GIS-Kartograph und Code-Generator.
@@ -1376,7 +1431,9 @@ def bestimmen_Kartentyp(user_text: str, layer) -> dict:
         json_match = re.search(r'(\{.*\})', response.content.strip(), re.DOTALL)
 
         if json_match:
-            return json.loads(json_match.group(1))
+            result = json.loads(json_match.group(1))
+            result = validate_kartentyp_result(user_text, layer, result)
+            return result
 
         raise ValueError()
 
@@ -1473,6 +1530,12 @@ def get_multi_layer_styles(user_text: str, layers):
         Der Nutzer kann den Stil eines oder mehrerer Layer ändern.
 
         Regeln:
+        - Wenn der Nutzer "Transparenz" oder "Deckkraft" bei Polygon-, GeoJSON- oder Choropleth-Layern sagt, verwende fillOpacity.
+        - Wenn der Nutzer ausdrücklich "opacity" sagt, verwende opacity.
+        - Wenn der Nutzer "Füllfarbe" sagt, verwende fillColor.
+        - Wenn der Nutzer "Randfarbe" oder "Linienfarbe" sagt, verwende color.
+        - Wenn der Nutzer "Linienstärke", "Randstärke" oder "dicker" sagt, verwende weight.
+        - Wenn der Nutzer "Layer 2" nennt, ändere ausschließlich Layer 2.
         - Wenn der Nutzer nur einen Layer nennt, ändere nur diesen Layer.
         - Wenn der Nutzer mehrere Layer nennt, erstelle für jeden genannten Layer ein eigenes Update.
         - Wenn der Nutzer sagt "Layer 1 blau und Layer 2 rot", dann ändere Layer 1 und Layer 2 unterschiedlich.

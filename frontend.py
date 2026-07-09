@@ -392,7 +392,9 @@ if user_query:
                     if kartentype.get("critical_attributes_notice"):
                         output_text += f" **Datenhinweis:** *{kartentype['critical_attributes_notice']}*\n"
 
-                    st.session_state.workflow_state.append(f"input: {user_query}, goal: {result["tool"]}, result: success")
+                    st.session_state.workflow_state.append(
+                        f"input: {user_query}, goal: {result['tool']}, result: success"
+                    )
                     output=output_text
 
         elif result["tool"]=="export_map":
@@ -410,91 +412,89 @@ if user_query:
             html_to_png(html_path,png_path)
             png_to_pdf(png_path,pdf_path)
 
-            st.session_state.workflow_state.append(f"input: {user_query}, goal: {result["tool"]}, result: success")
+            st.session_state.workflow_state.append(
+                f"input: {user_query}, goal: {result['tool']}, result: success"
+            )
             
         elif result["tool"]=="set_title":
             selected_layer_name = get_selected_layer_name(user_query,show_layers)
             layer = next((l for l in show_layers if l["name"] == selected_layer_name), show_layers[-1])
             Karte_Titel=set_selected_layer_name(layer)
             st.session_state.Karte_Titel=Karte_Titel
-            st.session_state.workflow_state.append(f"input: {user_query}, goal: {result["tool"]}, result: success")
+            st.session_state.workflow_state.append(
+                f"input: {user_query}, goal: {result['tool']}, result: success"
+            )
 
-        elif result["tool"] == "Layer_Parameter_anzeigen" or any(k in user_query.lower() for k in [
-            "parameter",
-            "parametern",
-            "layer-parameter",
-            "layer parameter",
-            "darstellungsparameter",
-            "kartenparameter",
-            "einstellungen",
-            "einstellbare",
-            "einstellbare parameter",
-            "welche parameter",
-            "welche einstellungen",
-            "welche parameter hat",
-            "welche einstellungen hat",
-            "was kann ich ändern",
-            "was kann ich aendern",
-            "was kann ich anpassen",
-            "farbe",
-            "füllfarbe",
-            "fuellfarbe",
-            "randfarbe",
-            "transparenz",
-            "deckkraft",
-            "opacity",
-            "fillopacity",
-            "linienbreite",
-            "linienstärke",
-            "linienstaerke",
-            "randstärke",
-            "randstaerke",
-            "radius",
-            "blur",
-            "unschärfe",
-            "unschaerfe"
-        ]):
-            target_layers = show_layers if show_layers else layers
+        elif result["tool"] == "Layer_Parameter_anzeigen":
+            target_layers = show_layers + [
+                l for l in layers
+                if l["name"] not in [sl["name"] for sl in show_layers]
+            ]
 
             if not target_layers:
-                output = "Bitte erstellen Sie zuerst einen Kartenlayer."
+                output = "Bitte laden Sie zuerst Geodaten hoch oder erstellen Sie einen Kartenlayer."
             else:
                 selected_layer_name = get_selected_layer_name(user_query, target_layers)
-                layer = next((l for l in target_layers if l["name"] == selected_layer_name), target_layers[-1])
+
+                layer = next(
+                    (l for l in target_layers if l["name"] == selected_layer_name),
+                    target_layers[-1]
+                )
 
                 output = describe_layer_parameters(layer)
                 st.session_state.workflow_state.append(
                     f"input: {user_query}, goal: Layer_Parameter_anzeigen, result: success"
-                )    
+                ) 
 
-        elif result["tool"]=="Kartenstil_anpassen": 
-            style_plan = get_multi_layer_styles(user_query, show_layers)
+        elif result["tool"] == "Kartenstil_anpassen":
+            if not show_layers:
+                output = "Bitte erstellen Sie zuerst einen Kartenlayer, bevor Sie den Stil ändern."
+                st.session_state.workflow_state.append(
+                    f"input: {user_query}, goal: Kartenstil_anpassen, result: failure"
+                )
+            else:
+                style_plan = get_multi_layer_styles(user_query, show_layers)
+                changed_layers = []
 
-            for update in style_plan.get("updates", []):
+                for update in style_plan.get("updates", []):
+                    layer_number = update.get("layer_number")
+                    style_update = update.get("style", {})
 
-                layer_number = update.get("layer_number")
-                style_update = update.get("style", {})
+                    if layer_number is None:
+                        continue
 
-                if layer_number is None:
-                    continue
+                    index = int(layer_number) - 1
 
-                index = int(layer_number) - 1
+                    if 0 <= index < len(show_layers):
+                        layer = show_layers[index]
 
-                if 0 <= index < len(show_layers):
+                        if "folium_kwargs" not in layer:
+                            layer["folium_kwargs"] = {}
 
-                    layer = show_layers[index]
+                        layer["folium_kwargs"].update(style_update)
 
-                    if "folium_kwargs" not in layer:
-                        layer["folium_kwargs"] = {}
+                        if "style" not in layer:
+                            layer["style"] = {}
 
-                    layer["folium_kwargs"].update(style_update)
+                        layer["style"].update(style_update)
 
-                    if "style" not in layer:
-                        layer["style"] = {}
+                        changed_layers.append(
+                            f"Layer {layer_number} ({layer['name']}): {style_update}"
+                        )
 
-                    layer["style"].update(style_update)
+                if changed_layers:
+                    output = "Der Kartenstil wurde angepasst:\n\n"
+                    for item in changed_layers:
+                        output += f"- {item}\n"
 
-            st.session_state.workflow_state.append(f"input: {user_query}, goal: {result["tool"]}, result: success")
+                    st.session_state.workflow_state.append(
+                        f"input: {user_query}, goal: Kartenstil_anpassen, result: success"
+                    )
+                else:
+                    output = "Es wurde kein passender Layer oder kein gültiger Stilparameter erkannt."
+                    st.session_state.workflow_state.append(
+                        f"input: {user_query}, goal: Kartenstil_anpassen, result: failure"
+                    )
 
         # ====================================================================
         # UNIFIED SPATIAL ANALYSIS GATEWAY (BUFFER, NEAREST, OVERLAY COUNT)
@@ -855,17 +855,22 @@ if user_query:
                 new_layers.append(original_layer)
   
             st.session_state.show_layers=new_layers
-            st.session_state.workflow_state.append(f"input: {user_query}, goal: {result["tool"]}, result: success")
+            st.session_state.workflow_state.append(
+                f"input: {user_query}, goal: {result['tool']}, result: success"
+            )
         
         elif result["tool"]=="Geodatei_analysieren": 
             selected_layer_name = get_selected_layer_name(user_query,layers)
             layer = next((l for l in layers if l["name"] == selected_layer_name), layers[-1])
             output=verstehen_Geodatei(user_query,layer)
-            st.session_state.workflow_state.append(f"input: {user_query}, goal: {result["tool"]}, result: success")
-
+            st.session_state.workflow_state.append(
+                f"input: {user_query}, goal: {result['tool']}, result: success"
+            )
         elif result["tool"]=="get_overview": 
             output=get_overview(user_query)
-            st.session_state.workflow_state.append(f"input: {user_query}, goal: {result["tool"]}, result: success")
+            st.session_state.workflow_state.append(
+                f"input: {user_query}, goal: {result['tool']}, result: success"
+            )
 
         elif result["tool"]=="error":
             st.session_state.workflow_state.append(f"input: {user_query}, goal: unsupported function, result: failure")
