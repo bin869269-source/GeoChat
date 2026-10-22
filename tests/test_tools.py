@@ -21,7 +21,7 @@ SIGNATURES = {
 
 def test_registration(backend):
     assert [t.name for t in backend.TOOLS] == list(SIGNATURES)
-    assert backend.llm.tools == backend.TOOLS
+    assert backend.llm_with_tools.tools == backend.TOOLS
 
 
 @pytest.mark.parametrize("name", SIGNATURES)

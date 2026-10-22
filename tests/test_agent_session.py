@@ -8,14 +8,15 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from tests.conftest import ROOT
 
 
-def test_missing_credential_blocks_import(backend, monkeypatch):
-    # Read neither .env nor Streamlit secrets. Confirm the production import
-    # barrier independently of the happy-path dummy-key fixture.
+def test_missing_credential_blocks_creation_not_import(backend, monkeypatch):
+    # Approved Phase 3C change: import is credential-free, actual creation is not.
     monkeypatch.delenv("DEEPSEEK_API_KEY")
     spec = importlib.util.spec_from_file_location("backend_no_key", ROOT / "backend.py")
     module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module._runtime._model is None
     with pytest.raises(ValueError, match="DEEPSEEK_API_KEY wurde nicht gefunden"):
-        spec.loader.exec_module(module)
+        module.create_llm()
 
 
 def install_script(backend, monkeypatch, steps):

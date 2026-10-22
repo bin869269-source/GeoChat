@@ -1,0 +1,112 @@
+"""Single-agent ReAct workflow with explicit model, tools and layer access."""
+from functools import partial
+from threading import RLock
+from typing import TypedDict, Sequence, Annotated, Optional, List
+
+from langchain_core.messages import BaseMessage, SystemMessage
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+
+class AgentState(TypedDict):
+    """LangGraph 状态定义：自动利用 add_messages 维护 ReAct 循环中 Message 的历史状态"""
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    updated_show_layers: Optional[List[dict]]
+
+
+def agent_reasoner(state: AgentState, *, llm_with_tools, get_layers) -> dict:
+    """Reason 阶段：由 LLM 结合长上下文自主决定直接回答或调用工具"""
+    raw_layers, show_layers = get_layers()
+    raw_summary = [f"'{l['name']}' ({l['type']})" for l in raw_layers]
+    show_summary = [f"'{l['name']}' ({l['type']})" for l in show_layers]
+
+    system_prompt = f"""
+    Du bist GeoGPT, ein autonomer und professioneller GIS-Agent.
+    Deine Aufgabe ist es, Nutzerbefehle über räumliche Analysen und Kartenerstellung selbstständig auszuführen.
+
+    AKTUELLER ZUSTAND DER ANWENDUNG:
+    - Hochgeladene Rohdaten-Layer: [{', '.join(raw_summary) if raw_summary else 'Keine'}]
+    - Derzeit auf der Karte angezeigte Layer: [{', '.join(show_summary) if show_summary else 'Keine'}]
+
+    HANDLUNGSLEITFADEN:
+    1. Du darfst und sollst Werkzeuge (Tools) verwenden, um Aktionen durchzuführen.
+    2. Wenn ein Befehl mehrere Schritte erfordert (z.B. 'Lade Stadt Dresden und lege einen 1000m Puffer an'), führe die Werkzeuge nacheinander aus.
+    3. Gib dem Nutzer nach Beendigung aller Tool-Aufrufe eine prägnante, informative Zusammenfassung auf Deutsch.
+    """
+
+    # 过滤掉系统消息，在首位统一拼装最新的系统认知
+    user_and_assistant_msgs = [m for m in state["messages"] if not isinstance(m, SystemMessage)]
+    full_messages = [SystemMessage(content=system_prompt)] + list(user_and_assistant_msgs)
+
+    response = llm_with_tools.invoke(full_messages)
+    return {"messages": [response]}
+
+
+def should_continue(state: AgentState):
+    """条件路由：判断 LLM 决定继续执行工具调用，还是已经结束推理给出最终答案"""
+    last_message = state["messages"][-1]
+    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        return "tools"
+    return END
+
+
+def build_workflow(llm_with_tools, tools, get_layers):
+    """Build the original graph with an already-bound model and explicit inputs."""
+    workflow = StateGraph(AgentState)
+    workflow.add_node("agent", partial(agent_reasoner, llm_with_tools=llm_with_tools, get_layers=get_layers))
+    workflow.add_node("tools", ToolNode(tools))
+    workflow.add_edge(START, "agent")
+    workflow.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    workflow.add_edge("tools", "agent")
+    return workflow
+
+
+def create_agent_app(llm, tools, get_layers):
+    """Bind tools exactly once and compile; caller supplies the model instance."""
+    return build_workflow(llm.bind_tools(tools), tools, get_layers).compile()
+
+
+class AgentRuntime:
+    """Small lazy compatibility runtime, with one model/binding/graph per instance.
+
+    This only protects runtime construction, NOT the legacy layer bus or session
+    execution. It does not provide business-state isolation or transactions.
+    """
+
+    def __init__(self, model_factory, tools, get_layers):
+        self._model_factory = model_factory
+        self._tools = tools
+        self._get_layers = get_layers
+        self._model = self._bound_model = self._workflow = self._app = None
+        self._lock = RLock()
+
+    @property
+    def model(self):
+        with self._lock:
+            if self._model is None:
+                self._model = self._model_factory()
+            return self._model
+
+    @property
+    def bound_model(self):
+        with self._lock:
+            if self._bound_model is None:
+                self._bound_model = self.model.bind_tools(self._tools)
+            return self._bound_model
+
+    @property
+    def workflow(self):
+        with self._lock:
+            if self._workflow is None:
+                self._workflow = build_workflow(self.bound_model, self._tools, self._get_layers)
+            return self._workflow
+
+    @property
+    def app(self):
+        with self._lock:
+            if self._app is None:
+                self._app = self.workflow.compile()
+            return self._app
+
+    def invoke(self, *args, **kwargs):
+        return self.app.invoke(*args, **kwargs)
