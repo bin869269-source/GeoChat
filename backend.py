@@ -8,11 +8,9 @@ import urllib.parse
 import requests
 from pathlib import Path
 from typing import TypedDict, Sequence, Annotated, Optional, List, Dict, Any
-from itertools import combinations
 from shapely.ops import nearest_points
 
 from dotenv import load_dotenv
-import pandas as pd
 import numpy as np
 import geopandas as gpd
 from shapely.geometry import Point, shape, mapping
@@ -31,6 +29,11 @@ from langchain_core.tools import tool
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
+
+from gis.data_io import extract_features_to_gdf, parse_uploaded_file
+from gis import data_io as gis_data_io
+from gis.geometry import buffer_geometries, pairwise_distances
+from gis import statistics as gis_statistics
 
 # ==========================================
 # 1. 基础环境与大模型初始化
@@ -100,35 +103,9 @@ def make_unique_layer_name(base_name: str, existing_layers: List[dict]) -> str:
         new_name = f"{base_name} ({counter})"
     return new_name
 
-def extract_features_to_gdf(data_input: Any) -> gpd.GeoDataFrame:
-    feats = []
-    if isinstance(data_input, list):
-        for p in data_input:
-            if isinstance(p, dict) and "lat" in p and "lon" in p:
-                feats.append({
-                    "type": "Feature",
-                    "geometry": {"type": "Point", "coordinates": [float(p["lon"]), float(p["lat"])]},
-                    "properties": p.get("properties", p)
-                })
-            elif isinstance(p, dict) and "geometry" in p:
-                feats.append(p)
-    elif isinstance(data_input, dict):
-        if data_input.get("type") == "FeatureCollection":
-            feats = data_input.get("features", [])
-        elif data_input.get("type") == "Feature":
-            feats = [data_input]
-        elif "features" in data_input:
-            feats = data_input["features"]
-            
-    if not feats:
-        raise ValueError("Keine gültigen Geodaten extrahierbar.")
-    return gpd.GeoDataFrame.from_features(feats, crs="EPSG:4326")
-
 def clean_gdf_for_geojson(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    for col in gdf.columns:
-        if col != "geometry":
-            gdf[col] = gdf[col].apply(lambda x: x.item() if hasattr(x, "item") else x)
-    return gdf
+    """Compatibility entry point retaining the original in-place behavior."""
+    return gis_data_io.clean_gdf_for_geojson(gdf, inplace=True)
 
 
 # ==========================================
@@ -228,9 +205,7 @@ def calculate_buffer_analysis(layer_name: str, distance_meters: float = 500.0) -
     
     try:
         gdf = extract_features_to_gdf(target["data"])
-        gdf_proj = gdf.to_crs(epsg=3857)
-        gdf_proj["geometry"] = gdf_proj.buffer(distance_meters)
-        res_gdf = gdf_proj.to_crs(epsg=4326)
+        res_gdf = buffer_geometries(gdf, distance_meters)
         res_gdf = clean_gdf_for_geojson(res_gdf)
         
         new_layer_name = make_unique_layer_name(f"Puffer_{int(distance_meters)}m_{target['name']}", show_layers)
@@ -259,8 +234,7 @@ def calculate_area_and_density(polygon_layer_name: str, point_layer_name: Option
     
     try:
         gdf_poly = extract_features_to_gdf(poly_layer["data"])
-        gdf_poly_proj = gdf_poly.to_crs(epsg=25832)
-        gdf_poly["area_km2"] = (gdf_poly_proj.geometry.area / 1_000_000).round(4)
+        gdf_poly = gis_statistics.calculate_area(gdf_poly)
         
         target_field = "area_km2"
         layer_suffix = "Flaeche"
@@ -269,13 +243,7 @@ def calculate_area_and_density(polygon_layer_name: str, point_layer_name: Option
             pt_layer = next((l for l in pool if l["name"].lower() == point_layer_name.lower()), None)
             if pt_layer:
                 gdf_pt = extract_features_to_gdf(pt_layer["data"])
-                # 投影到 Web Mercator 执行空间连接
-                gdf_poly_3857 = gdf_poly.to_crs(epsg=3857)
-                gdf_pt_3857 = gdf_pt.to_crs(epsg=3857)
-                joined = gpd.sjoin(gdf_pt_3857, gdf_poly_3857, predicate="within", how="inner")
-                counts = joined.groupby("index_right").size()
-                gdf_poly["objekt_anzahl"] = gdf_poly.index.map(counts).fillna(0).astype(int)
-                gdf_poly["dichte_pro_km2"] = (gdf_poly["objekt_anzahl"] / gdf_poly["area_km2"].replace(0, np.nan)).round(2).fillna(0)
+                gdf_poly = gis_statistics.calculate_density(gdf_poly, gdf_pt)
                 target_field = "dichte_pro_km2"
                 layer_suffix = "Dichte"
 
@@ -386,28 +354,20 @@ def calculate_feature_distances(layer_name: str, max_pairs: int = 10) -> str:
         if len(gdf) < 2:
             return f"Der Layer '{layer_name}' enthält weniger als 2 Objekte. Abstandsberechnung nicht möglich."
 
-        # 2. 投影到德累斯顿本地高精度米制坐标系 (EPSG:25832)
-        gdf_proj = gdf.to_crs(epsg=25832)
-
         # 尝试提取能代表建筑名称的字段
-        name_cols = [c for c in ["bezeichnung", "name", "einrichtung", "strasse"] if c in gdf_proj.columns]
+        name_cols = [c for c in ["bezeichnung", "name", "einrichtung", "strasse"] if c in gdf.columns]
         label_col = name_cols[0] if name_cols else None
 
         results = []
-        # 计算两两之间的笛卡尔实际距离（单位：米）
-        for idx1, idx2 in combinations(range(len(gdf_proj)), 2):
-            geom1 = gdf_proj.iloc[idx1].geometry
-            geom2 = gdf_proj.iloc[idx2].geometry
-
-            dist = geom1.distance(geom2)
-
-            name1 = str(gdf_proj.iloc[idx1][label_col]) if label_col else f"Objekt {idx1 + 1}"
-            name2 = str(gdf_proj.iloc[idx2][label_col]) if label_col else f"Objekt {idx2 + 1}"
+        for pair in pairwise_distances(gdf):
+            idx1, idx2 = pair["from_index"], pair["to_index"]
+            name1 = str(gdf.iloc[idx1][label_col]) if label_col else f"Objekt {idx1 + 1}"
+            name2 = str(gdf.iloc[idx2][label_col]) if label_col else f"Objekt {idx2 + 1}"
 
             results.append({
                 "from": name1,
                 "to": name2,
-                "distance_m": round(dist, 1)
+                "distance_m": pair["distance_m"]
             })
 
         # 按距离从近到远排序
@@ -672,26 +632,3 @@ def smart_analyze_geodata(filename: str, sample_data_str: str) -> dict:
         return json.loads(match.group(1)) if match else {"detected_type": "geojson", "data_fields": [], "recommended_layer_name": filename}
     except Exception:
         return {"detected_type": "geojson", "data_fields": [], "recommended_layer_name": filename}
-
-def parse_uploaded_file(uploaded_file) -> dict:
-    filename = uploaded_file.name.lower()
-    if filename.endswith(".geojson") or filename.endswith(".json"):
-        data = json.load(uploaded_file)
-        if isinstance(data, dict) and data.get("type") in ["FeatureCollection", "Feature"]:
-            return {"type": "geojson", "data": data}
-        return {"type": "points", "data": data}
-    elif filename.endswith(".csv"):
-        df = pd.read_csv(uploaded_file)
-        if "lat" not in df.columns or "lon" not in df.columns:
-            raise ValueError("CSV muss die Spalten 'lat' und 'lon' enthalten.")
-        points = []
-        for i, row in df.iterrows():
-            props = {col: row[col] for col in df.columns if col not in ["lat", "lon", "name"]}
-            points.append({
-                "name": row.get("name", f"Point {i+1}"),
-                "lat": float(row["lat"]),
-                "lon": float(row["lon"]),
-                "properties": props
-            })
-        return {"type": "points", "data": points}
-    raise ValueError("Format nicht unterstützt.")
