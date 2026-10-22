@@ -9,6 +9,9 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
+from core.session import SessionData
+from .llm import create_llm
+
 class AgentState(TypedDict):
     """LangGraph 状态定义：自动利用 add_messages 维护 ReAct 循环中 Message 的历史状态"""
     messages: Annotated[Sequence[BaseMessage], add_messages]
@@ -93,7 +96,7 @@ def create_agent_app(llm, tools, get_layers):
 
 
 class AgentRuntime:
-    """Small lazy compatibility runtime, with one model/binding/graph per instance.
+    """Lazy execution runtime, with one model/binding/graph per instance.
 
     The initialization lock only protects construction. Session-bound tools own
     their data and enforce single-tool atomic publication separately.
@@ -139,3 +142,37 @@ class AgentRuntime:
 
     async def ainvoke(self, *args, **kwargs):
         return await self.app.ainvoke(*args, **kwargs)
+
+
+class SessionAgent:
+    """Agent execution and seven tools explicitly bound to one business session."""
+
+    def __init__(self, session: SessionData, model_factory=None):
+        from .tools import create_tools
+
+        self.session = session
+        self.TOOLS = create_tools(session)
+        for registered in self.TOOLS:
+            setattr(self, registered.name, registered)
+        self._runtime = AgentRuntime(model_factory or create_llm, self.TOOLS, self.get_agent_layers)
+        self.agent_app = self._runtime
+
+    def get_agent_layers(self):
+        return self.session.get_agent_layers()
+
+    @property
+    def llm(self):
+        return self._runtime.model
+
+    @property
+    def llm_with_tools(self):
+        return self._runtime.bound_model
+
+    @property
+    def workflow(self):
+        return self._runtime.workflow
+
+
+def create_agent_session(session: SessionData | None = None, model_factory=None) -> SessionAgent:
+    """Create a private agent; an omitted session creates a fresh container."""
+    return SessionAgent(session if session is not None else SessionData(), model_factory)

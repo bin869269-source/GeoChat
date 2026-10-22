@@ -106,12 +106,12 @@ def test_folium_identifier_injection_stays_in_render_copy(kind):
     assert all("id" not in f for f in entry["data"]["features"])
 
 
-def test_legacy_backend_renderer_exports(backend):
+def test_formal_renderer_entries_and_default_style():
     names = ["create_layered_map", "add_points_layer", "add_heatmap_layer",
              "add_choropleth_layer", "add_geojson_layer", "Titel_hinzufügen", "render_map_html"]
     for name in names:
-        assert getattr(backend, name) is getattr(renderer, name)
-    assert backend.DEFAULT_MAP_STYLE is renderer.DEFAULT_MAP_STYLE
+        assert callable(getattr(renderer, name))
+        assert getattr(renderer, name).__module__ == "maps.renderer"
     assert renderer.DEFAULT_MAP_STYLE == {"color": "blue", "weight": 2, "fillColor": "blue", "fillOpacity": 0.4}
 
 

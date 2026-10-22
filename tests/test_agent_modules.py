@@ -1,4 +1,8 @@
 """Phase 3C: real workflow/tools with explicit, deterministic model boundaries."""
+
+from gis import geometry
+from gis import statistics as gis_statistics
+from agent import llm as agent_llm
 import os
 import subprocess
 import sys
@@ -39,8 +43,8 @@ def tool_call(name, args, number):
 
 
 @pytest.fixture
-def tools(backend):
-    return backend
+def tools(session_agent):
+    return session_agent
 
 
 def test_agent_imports_and_mock_workflow_without_backend_or_key():
@@ -97,11 +101,11 @@ def test_agent_imports_and_mock_workflow_without_backend_or_key():
     assert "independent OK" in result.stdout
 
 
-def test_plain_backend_import_does_not_initialize(backend):
-    assert backend._runtime._model is None
-    assert backend._runtime._bound_model is None
-    assert backend._runtime._workflow is None
-    assert backend._runtime._app is None
+def test_session_factory_does_not_initialize_model_or_graph(session_agent):
+    assert session_agent._runtime._model is None
+    assert session_agent._runtime._bound_model is None
+    assert session_agent._runtime._workflow is None
+    assert session_agent._runtime._app is None
 
 
 def test_explicit_model_config_without_reading_configuration(monkeypatch):
@@ -239,7 +243,7 @@ def test_original_conditional_route(calls, expected):
 def test_prompt_reads_current_layers_and_preserves_tool_messages(points, polygons, tools):
     seen = []
     model = SimpleNamespace(invoke=lambda messages: (seen.append(messages) or AIMessage(content="done")))
-    tools.set_agent_context([points], [polygons])
+    tools.session.replace_from_legacy([points], [polygons])
     messages = [SystemMessage(content="obsolete"), HumanMessage(content="synthetic"),
                 ToolMessage(content="tool evidence", tool_call_id="1")]
     graph.agent_reasoner({"messages": messages}, llm_with_tools=model, get_layers=tools.get_agent_layers)
@@ -247,14 +251,14 @@ def test_prompt_reads_current_layers_and_preserves_tool_messages(points, polygon
     prompt = seen[0][0].content
     assert "obsolete" not in prompt and "'points' (points)" in prompt and "'polygons' (geojson)" in prompt
     assert "autonomer und professioneller GIS-Agent" in prompt and "führe die Werkzeuge nacheinander aus" in prompt
-    tools.set_agent_context([], [])
+    tools.session.replace_from_legacy([], [])
     graph.agent_reasoner({"messages": messages}, llm_with_tools=model, get_layers=tools.get_agent_layers)
     assert "'points'" not in seen[1][0].content and "Keine" in seen[1][0].content
 
 
 def test_single_step_graph_direct_tools(points, tools):
     shown = []
-    tools.set_agent_context([points], shown)
+    tools.session.replace_from_legacy([points], shown)
     shown = tools.get_agent_layers()[1]
     model = ScriptedModel([tool_call("visualize_layer_on_map", {"layer_name": "points", "map_type": "points"}, 1),
                            AIMessage(content="done")])
@@ -267,9 +271,9 @@ def test_single_step_graph_direct_tools(points, tools):
 
 def test_multistep_fetch_buffer_style(polygons, monkeypatch, tools):
     shown = []
-    tools.set_agent_context([], shown)
+    tools.session.replace_from_legacy([], shown)
     shown = tools.get_agent_layers()[1]
-    monkeypatch.setattr(tools.requests, "get", lambda *a, **k: SimpleNamespace(
+    monkeypatch.setattr(tool_module.requests, "get", lambda *a, **k: SimpleNamespace(
         status_code=200, json=lambda: polygons["data"]))
     model = ScriptedModel([
         tool_call("fetch_city_boundary_osm", {"city_name": "Test"}, 1),
@@ -294,39 +298,39 @@ def test_error_feedback_returns_to_model(tools):
     assert tools.get_agent_layers() == ([], [])
 
 
-def test_facade_reuses_models_and_explicit_session(backend, tools):
-    assert backend.TOOLS is tools.TOOLS and backend.session is tools.session
+def test_session_agent_reuses_models_and_explicit_session(session_agent, tools):
+    assert session_agent.TOOLS is tools.TOOLS and session_agent.session is tools.session
     for tool in tools.TOOLS:
-        assert getattr(backend, tool.name) is tool
+        assert getattr(session_agent, tool.name) is tool
     raw, shown = [], []
-    backend.set_agent_context(raw, shown)
-    assert tools.get_agent_layers()[0] is backend.session.raw_view
-    assert tools.get_agent_layers()[1] is backend.session.map_view
-    assert backend.llm is backend._runtime.model
-    assert backend.llm_with_tools is backend._runtime.bound_model
-    assert backend.workflow is backend._runtime.workflow
+    session_agent.session.replace_from_legacy(raw, shown)
+    assert tools.get_agent_layers()[0] is session_agent.session.raw_view
+    assert tools.get_agent_layers()[1] is session_agent.session.map_view
+    assert session_agent.llm is session_agent._runtime.model
+    assert session_agent.llm_with_tools is session_agent._runtime.bound_model
+    assert session_agent.workflow is session_agent._runtime.workflow
 
 
 def test_tools_delegate_buffer_area_density(points, polygons, monkeypatch, tools):
     calls = []
-    buffer = tools.buffer_geometries
-    area = tools.gis_statistics.calculate_area
-    density = tools.gis_statistics.calculate_density
+    buffer = geometry.buffer_geometries
+    area = gis_statistics.calculate_area
+    density = gis_statistics.calculate_density
     def spy(name, implementation):
         def invoke(*args, **kwargs):
             calls.append(name)
             return implementation(*args, **kwargs)
         return invoke
     monkeypatch.setattr(tool_module, "buffer_geometries", spy("buffer", buffer))
-    monkeypatch.setattr(tools.gis_statistics, "calculate_area", spy("area", area))
-    monkeypatch.setattr(tools.gis_statistics, "calculate_density", spy("density", density))
-    tools.set_agent_context([points, polygons], [])
+    monkeypatch.setattr(gis_statistics, "calculate_area", spy("area", area))
+    monkeypatch.setattr(gis_statistics, "calculate_density", spy("density", density))
+    tools.session.replace_from_legacy([points, polygons], [])
     assert "Erfolg" in tools.calculate_buffer_analysis.invoke({"layer_name": "points"})
     assert "Erfolg" in tools.calculate_area_and_density.invoke({"polygon_layer_name": "polygons", "point_layer_name": "points"})
     assert calls == ["buffer", "area", "density"]
 
 
-def test_facade_metadata_reasoner_and_graph_reuse_one_model(backend, monkeypatch):
+def test_formal_metadata_reasoner_and_graph_reuse_one_model(session_agent, monkeypatch):
     model = ScriptedModel([AIMessage(content="direct reasoner"), AIMessage(content="graph answer")])
     metadata_calls, factories = [], []
     def metadata_invoke(messages):
@@ -336,18 +340,18 @@ def test_facade_metadata_reasoner_and_graph_reuse_one_model(backend, monkeypatch
     def factory():
         factories.append("created")
         return model
-    monkeypatch.setattr(backend._runtime, "_model_factory", factory)
-    assert backend.smart_analyze_geodata("synthetic.csv", "sample") == {
+    monkeypatch.setattr(session_agent._runtime, "_model_factory", factory)
+    assert agent_llm.smart_analyze_geodata('synthetic.csv', 'sample', llm=session_agent.llm) == {
         "recommended_layer_name": "Shared model"}
     assert len(metadata_calls) == 1 and model.bind_count == 0
     state = {"messages": [HumanMessage(content="synthetic")]}
-    assert backend.agent_reasoner(state)["messages"][0].content == "direct reasoner"
-    assert backend.should_continue({"messages": [AIMessage(content="done")]}) == END
-    assert backend.agent_app.invoke(state)["messages"][-1].content == "graph answer"
+    assert graph.agent_reasoner(state, llm_with_tools=session_agent.llm_with_tools, get_layers=session_agent.get_agent_layers)["messages"][0].content == "direct reasoner"
+    assert graph.should_continue({"messages": [AIMessage(content="done")]}) == END
+    assert session_agent.agent_app.invoke(state)["messages"][-1].content == "graph answer"
     assert factories == ["created"] and model.bind_count == 1
-    assert backend.llm is model and backend.workflow is backend._runtime.workflow
+    assert session_agent.llm is model and session_agent.workflow is session_agent._runtime.workflow
     with pytest.raises(AttributeError, match="unknown_compatibility_attribute"):
-        getattr(backend, "unknown_compatibility_attribute")
+        getattr(session_agent, "unknown_compatibility_attribute")
 
 
 @pytest.mark.parametrize("name,args,expected", [
@@ -360,7 +364,7 @@ def test_facade_metadata_reasoner_and_graph_reuse_one_model(backend, monkeypatch
     ("calculate_feature_distances", {"layer_name": "missing"}, "nicht gefunden"),
 ])
 def test_all_seven_tools_bind_dispatch_and_return_feedback(name, args, expected, monkeypatch, tools):
-    monkeypatch.setattr(tools.requests, "get", lambda *a, **k: SimpleNamespace(status_code=503))
+    monkeypatch.setattr(tool_module.requests, "get", lambda *a, **k: SimpleNamespace(status_code=503))
     model = ScriptedModel([tool_call(name, args, 1), AIMessage(content="handled")])
     result = graph.create_agent_app(model, tools.TOOLS, tools.get_agent_layers).invoke({
         "messages": [HumanMessage(content="synthetic tool dispatch")]})

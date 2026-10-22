@@ -1,4 +1,5 @@
 """Phase 3A: directly exercise the real GIS package and its dependency boundary."""
+
 import copy
 import os
 import subprocess
@@ -118,18 +119,22 @@ def test_scalar_cleaner_mutation_contract(inplace):
         assert frame.loc[0, "value"] == 7
 
 
-def test_legacy_cleaner_still_mutates_explicitly(backend):
+def test_legacy_cleaner_still_mutates_explicitly():
+    from agent.tools import clean_gdf_for_geojson
     frame = gpd.GeoDataFrame({"value": [ScalarLike()]}, geometry=[Point(9, 51)], crs=4326)
-    assert backend.clean_gdf_for_geojson(frame) is frame
+    assert clean_gdf_for_geojson(frame) is frame
     assert frame.loc[0, "value"] == 7
 
 
-def test_backend_data_compatibility_exports(backend):
-    assert backend.extract_features_to_gdf is data_io.extract_features_to_gdf
-    assert backend.parse_uploaded_file is data_io.parse_uploaded_file
-    assert backend.buffer_geometries is geometry.buffer_geometries
-    assert backend.pairwise_distances is geometry.pairwise_distances
-    assert backend.gis_statistics is statistics
+def test_formal_data_geometry_statistics_entrypoints():
+    parsed = data_io.parse_uploaded_file(upload("source.csv", "lat,lon,name\n51,9,A\n51.01,9.01,B\n"))
+    frame = data_io.extract_features_to_gdf(parsed["data"])
+    assert len(frame) == 2 and frame.crs.to_epsg() == 4326
+    distances = geometry.pairwise_distances(frame)
+    assert len(distances) == 1 and distances[0]["distance_m"] > 0
+    buffered = geometry.buffer_geometries(frame, 20)
+    area = statistics.calculate_area(buffered)
+    assert len(area) == 2 and (area["area_km2"] > 0).all()
 
 
 def test_buffer_retains_projection_and_does_not_mutate():

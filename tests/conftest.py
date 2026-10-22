@@ -1,5 +1,5 @@
 """Create explicit session-bound adapters behind credential/network boundaries."""
-import importlib.util
+import importlib.abc
 import io
 import json
 import socket
@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from shapely.geometry import mapping, Point, Polygon
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,6 +29,21 @@ def upload(name, data):
     stream = io.StringIO(data if isinstance(data, str) else json.dumps(data))
     stream.name = name
     return stream
+
+
+@pytest.fixture(autouse=True)
+def no_legacy_backend_import(monkeypatch):
+    """Prove runtime paths never load the removed facade, even dynamically."""
+    attempts = []
+    class NoBackend(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname.split(".")[0] == "backend":
+                attempts.append(fullname)
+                raise AssertionError("Legacy backend import is forbidden")
+    assert "backend" not in sys.modules
+    monkeypatch.setattr(sys, "meta_path", [NoBackend(), *sys.meta_path])
+    yield
+    assert not attempts, "A caught backend import still indicates an unmigrated caller"
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +86,8 @@ def offline(monkeypatch):
 
 
 @pytest.fixture
-def backend(monkeypatch):
+def session_agent(monkeypatch):
+    from agent.graph import create_agent_session
     import langchain_openai
     import streamlit
 
@@ -89,11 +106,7 @@ def backend(monkeypatch):
 
     monkeypatch.setattr(langchain_openai, "ChatOpenAI", OfflineLLM)
     monkeypatch.setattr(streamlit, "secrets", {})
-    spec = importlib.util.spec_from_file_location("backend", ROOT / "backend.py")
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, "backend", module)
-    spec.loader.exec_module(module)
-    bound = module.create_agent_session()
+    bound = create_agent_session()
     yield bound
     bound.session.reset()
 
@@ -111,9 +124,9 @@ def polygons():
 
 
 @pytest.fixture
-def bind(backend):
+def bind(session_agent):
     def set_layers(*raw, shown=None):
         raw_list, shown_list = list(raw), [] if shown is None else shown
-        backend.set_agent_context(raw_list, shown_list)
-        return backend.get_agent_layers()
+        session_agent.session.replace_from_legacy(raw_list, shown_list)
+        return session_agent.get_agent_layers()
     return set_layers

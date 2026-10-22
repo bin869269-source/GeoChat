@@ -4,17 +4,15 @@
 # ==============================================================================
 import streamlit as st
 import json
-import copy
 from streamlit_folium import st_folium
 from langchain_core.messages import HumanMessage, AIMessage
 
-# 从重构后的 backend 导入核心 Agent 与地图功能
-from backend import (
-    create_agent_session,
-    SessionData,
+from agent.graph import create_agent_session
+from agent.llm import smart_analyze_geodata
+from core.session import SessionData
+from gis.data_io import parse_uploaded_file
+from maps.renderer import (
     create_layered_map,
-    parse_uploaded_file,
-    DEFAULT_MAP_STYLE,
     Titel_hinzufügen,
     render_map_html
 )
@@ -158,7 +156,8 @@ with col1:
                             sample_str = json.dumps(raw_data, ensure_ascii=False)[:1000]
 
                         # 3. 调用元数据提取专家分析
-                        analysis = st.session_state.session_agent.smart_analyze_geodata(uploaded_file.name, sample_str)
+                        analysis = smart_analyze_geodata(
+                            uploaded_file.name, sample_str, llm=st.session_state.session_agent.llm)
                         detected_type = analysis.get("detected_type", parsed_data["type"])
                         detected_fields = analysis.get("data_fields", [])
                         recommended_name = analysis.get("recommended_layer_name", uploaded_file.name)

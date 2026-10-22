@@ -1,6 +1,7 @@
-# GeoChat Phase 2 测试运行说明
+# GeoChat 测试运行说明
 
-仅建立测试基线。业务源码、工具签名和工作流保持不变，最终分层架构尚未实施。
+当前测试直接调用 agent/、gis/、maps/、core/ 和 frontend.py；backend.py 已移除。
+Phase 2 报告及 CASE_RESULTS.md 保留为历史快照，不代表当前测试全集。
 
 ## 环境与运行
 
@@ -11,6 +12,8 @@
 # 已有 .venv 时直接运行，不需要联网或任何真实 API Key。
 .venv\Scripts\python.exe -m pytest tests -q -ra --tb=short --junitxml=tests/results.xml
 .venv\Scripts\python.exe tests/summarize_results.py
+# 可选：真实本机服务、HTTP 与 WebSocket 页面启动检查，执行后自动停止。
+.venv\Scripts\python.exe tests/check_startup.py
 
 # 新环境：用已安装的 Python 创建隔离环境，再安装测试所需依赖。
 python -m venv .venv
@@ -35,16 +38,17 @@ Streamlit 预期启动命令为：
 .venv\Scripts\python.exe -m streamlit run frontend.py
 ```
 
-实际联网启动需要合法模型配置；本次未执行此命令、未进行真实模型验证。
+空白页面启动无需 Key；实际对话和上传元数据分析需要模型配置。启动实测边界见 PHASE3E_REPORT.md。
 
 ## 测试边界
 
-- `conftest.py` 执行完整原始 backend 模块，用假 Key 替换进程环境值，禁用 dotenv 读取，并替换 Streamlit secrets。
+- `conftest.py` 创建独立正式 SessionAgent，用合成 Key 替换环境，禁用 dotenv 读取，并替换 Streamlit secrets。
+- 整个测试执行期间禁止导入 backend；即使动态导入被业务捕获，fixture 收尾仍会报错。
 - 仅模型构造、模型回答及 Nominatim HTTP 响应被替换；LangGraph、ToolNode、装饰工具、GIS 库、随机森林和 Folium 都是真实执行。
 - 阻止 HTTP 客户端与外部 socket 连接。仅允许 Windows asyncio 所需的字面量 loopback 连接；即使业务捕获了网络阻断异常，fixture 收尾仍报错。
-- 每个测试重新加载 backend 并清空全局上下文；会话串扰测试在单个测试内保留真实缺陷，不以 fixture 隔离冒充生产隔离。
+- 每个测试创建独立 Session；跨线程、交错执行和异步调用测试在同一进程建立多个实例，不用全局串行掩盖隔离问题。
 - `AppTest` 执行 Streamlit Python 服务端及控件事件；不执行浏览器 JavaScript，不验证地图瓦片、离线资源或真实下载交互。
-- HTML 保存到 pytest 临时目录，现有固定导出路径的测试也切换到临时目录；不产生仓库根目录地图文件。
+- 上传控件边界使用 Mock；HTML 内存下载和临时目录字节比较不验证浏览器实际下载，不产生仓库根目录地图文件。
 
 ## Regression 与 Correctness
 
@@ -55,6 +59,11 @@ Streamlit 预期启动命令为：
 | `test_agent_session.py` | 实际 LangGraph、脚本化模型、多步骤、失败、状态、Streamlit 控件 |
 | `test_gis_correctness.py` | 解析几何基准与 WGS84 椭球独立参考；正确性期望 |
 | `test_known_defects.py` | 有确定复现的接口、渲染及输入校验历史缺陷 |
+| `test_gis_core.py` | GIS 公开入口、输入保护、CRS 及独立进程 |
+| `test_map_renderer.py` | 全部地图类型、样式、顺序和内存 HTML |
+| `test_agent_modules.py` | 模型配置、延迟初始化、绑定及七工具分派 |
+| `test_session_contracts.py` | 所有权、生命周期、并发/异步隔离与原子提交 |
+| `test_app_integration.py` | 门面移除、依赖方向、导入顺序及完整服务端 UI 调用链 |
 
 GIS 参考包括：已知米制坐标的矩形面积和间距；WGS84 Geod 直接解生成的 100m 点对；
 Geod 反解检验 Buffer 半径；椭球多边形面积；明确面内/顶点/面外点及重叠区计数。
@@ -74,8 +83,8 @@ Geod 与业务采用的平面距离/面积计算路径不同，但底层仍共�
 ## 后续重构如何使用
 
 每批修改先运行全集，再检查 Known Defect 是否增加或出现 XPASS。
-迁移到用户确定的 `agent/`、`gis/`、`maps/`、`core/` 后，优先调整测试导入适配，
-保留输入数据、独立参考值和用户行为断言；新接口迁移完成前可保留 backend 兼容门面。
+最终模块已建立；后续修改保留输入数据、独立参考值和用户行为断言，优先适配正式接口。
 GIS 算法修复与文件搬迁分别审核，不降低断言或放宽容差以消除回归。
 
-最终状态见 `PHASE2_REPORT.md`；逐个测试状态见 `CASE_RESULTS.md`，机器结果见 `results.xml`。
+当前结果见 PHASE3E_REPORT.md。PHASE2_REPORT.md、CASE_RESULTS.md 为历史基线；
+results.xml 可选本地生成，不自动覆盖旧审核记录。当前 13 项 Known Defect 的组成见 Phase 3D/3E 报告。

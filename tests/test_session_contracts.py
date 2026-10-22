@@ -15,7 +15,7 @@ import pytest
 
 from agent import graph
 from agent import tools as tool_module
-from backend import create_agent_session
+from agent.graph import create_agent_session
 from core.contracts import Dataset, Layer, ToolResult
 from core.session import SessionData
 from tests.conftest import ROOT
@@ -346,20 +346,20 @@ def test_legacy_views_are_detached_and_reset_invalidates_old_ids(points):
         agent.session.get_dataset(old_id)
 
 
-def test_frontend_upload_pipeline_and_metadata_are_session_owned(backend, monkeypatch):
+def test_frontend_upload_pipeline_and_metadata_are_session_owned(session_agent, monkeypatch):
     import streamlit
     from tests.conftest import upload
     monkeypatch.setattr(streamlit, "file_uploader", lambda *a, **k: [
         upload("synthetic.csv", "lat,lon,name,value\n51,9,A,3\n")])
-    monkeypatch.setattr(backend.llm, "invoke", lambda messages: AIMessage(content=
+    monkeypatch.setattr(session_agent.llm, "invoke", lambda messages: AIMessage(content=
         '{"detected_type":"points","data_fields":["value"],"recommended_layer_name":"Uploaded"}'))
-    app = make_app(backend)
-    assert not app.exception and len(backend.session.datasets) == 1
-    d = next(iter(backend.session.datasets.values()))
+    app = make_app(session_agent)
+    assert not app.exception and len(session_agent.session.datasets) == 1
+    d = next(iter(session_agent.session.datasets.values()))
     assert d.name == "Uploaded" and d.source == "synthetic.csv"
     assert d.data[0]["lat"] == 51 and d.data[0]["properties"]["value"] == 3
     assert app.session_state.processed_files == {"synthetic.csv"}
-    assert backend.session.map_view == []
+    assert session_agent.session.map_view == []
 
 
 def test_frontend_creates_distinct_session_containers_and_lazy_agents(points):
@@ -381,7 +381,7 @@ def test_frontend_creates_distinct_session_containers_and_lazy_agents(points):
     assert len(first.map_view) == 1 and second.datasets == {} and second.layers == {}
 
 
-def test_frontend_reset_rekeys_uploader_to_prevent_immediate_reimport(backend, monkeypatch):
+def test_frontend_reset_rekeys_uploader_to_prevent_immediate_reimport(session_agent, monkeypatch):
     import streamlit
     from tests.conftest import upload
     seen_keys = []
@@ -389,41 +389,41 @@ def test_frontend_reset_rekeys_uploader_to_prevent_immediate_reimport(backend, m
         seen_keys.append(kwargs["key"])
         return [upload("synthetic.csv", "lat,lon,name,value\n51,9,A,3\n")] if kwargs["key"] == "uploads_0" else []
     monkeypatch.setattr(streamlit, "file_uploader", uploader)
-    monkeypatch.setattr(backend.llm, "invoke", lambda messages: AIMessage(content="{}"))
-    app = make_app(backend)
-    session_id = backend.session.session_id
-    assert not app.exception and len(backend.session.datasets) == 1, ([e.value for e in app.error], seen_keys)
+    monkeypatch.setattr(session_agent.llm, "invoke", lambda messages: AIMessage(content="{}"))
+    app = make_app(session_agent)
+    session_id = session_agent.session.session_id
+    assert not app.exception and len(session_agent.session.datasets) == 1, ([e.value for e in app.error], seen_keys)
     next(button for button in app.button if button.label == "🗑️ Chat & Sitzung zurücksetzen").click().run()
-    assert not app.exception and backend.session.session_id == session_id
-    assert backend.session.datasets == {} and backend.session.layers == {} and backend.session.results == []
+    assert not app.exception and session_agent.session.session_id == session_id
+    assert session_agent.session.datasets == {} and session_agent.session.layers == {} and session_agent.session.results == []
     assert app.session_state.processed_files == set() and seen_keys[-1] == "uploads_1"
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
                    reason="KD-CSV-METADATA: numeric-only CSV sampling contains non-JSON numpy int64")
-def test_numeric_only_csv_can_complete_frontend_upload(backend, monkeypatch):
+def test_numeric_only_csv_can_complete_frontend_upload(session_agent, monkeypatch):
     import streamlit
     from tests.conftest import upload
     monkeypatch.setattr(streamlit, "file_uploader", lambda *a, **k: [
         upload("numeric.csv", "lat,lon,value\n51,9,3\n")])
-    monkeypatch.setattr(backend.llm, "invoke", lambda messages: AIMessage(content="{}"))
-    app = make_app(backend)
-    assert not app.exception and not app.error and len(backend.session.datasets) == 1
+    monkeypatch.setattr(session_agent.llm, "invoke", lambda messages: AIMessage(content="{}"))
+    app = make_app(session_agent)
+    assert not app.exception and not app.error and len(session_agent.session.datasets) == 1
 
 
-def test_frontend_rejects_bad_upload_without_publishing(backend, monkeypatch):
+def test_frontend_rejects_bad_upload_without_publishing(session_agent, monkeypatch):
     import streamlit
     from tests.conftest import upload
     monkeypatch.setattr(streamlit, "file_uploader", lambda *a, **k: [upload("bad.csv", "wrong\n1\n")])
-    app = make_app(backend)
+    app = make_app(session_agent)
     assert not app.exception and app.error
-    assert backend.session.datasets == {} and app.session_state.processed_files == set()
+    assert session_agent.session.datasets == {} and app.session_state.processed_files == set()
 
 
-def test_two_frontend_sessions_keep_deletion_and_reset_local(backend, points, polygons):
-    a = backend
+def test_two_frontend_sessions_keep_deletion_and_reset_local(session_agent, points, polygons):
+    a = session_agent
     b = bound([polygons])
-    a.set_agent_context([points], [])
+    a.session.replace_from_legacy([points], [])
     first, second = make_app(a), make_app(b)
     before_b = b.session.legacy_layers()
     next(button for button in first.button if button.label == "🗑️ Chat & Sitzung zurücksetzen").click().run()
