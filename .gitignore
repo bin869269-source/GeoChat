@@ -8,3 +8,10 @@ map_temp.html
 map_temp.png
 .DS_Store
 .vscode/
+.venv/
+.uv-cache/
+.pytest_cache/
+.coverage
+htmlcov/
+/tests/logs/
+/tests/results.xml

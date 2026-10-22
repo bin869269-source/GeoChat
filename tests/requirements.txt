@@ -1,0 +1,20 @@
+# Phase 2 direct runtime/test dependencies; verified on CPython 3.14.5 Windows x64.
+-c constraints.txt
+pytest==9.1.1
+streamlit==1.66.1
+streamlit-folium==0.27.4
+python-dotenv==1.2.4
+requests==2.34.2
+pandas==3.0.6
+numpy==2.5.4
+geopandas==1.2.0
+shapely==2.2.0
+scikit-learn==1.9.1
+folium==0.20.0
+branca==0.8.2
+geopy==2.5.0
+langchain-openai==1.7.2
+langchain-core==1.6.13
+langgraph==1.2.16
+pyproj==3.8.0
+httpx==0.28.1
