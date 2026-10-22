@@ -4,6 +4,7 @@ from threading import RLock
 from typing import TypedDict, Sequence, Annotated, Optional, List
 
 from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.runnables import RunnableLambda
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -17,8 +18,11 @@ class AgentState(TypedDict):
 def agent_reasoner(state: AgentState, *, llm_with_tools, get_layers) -> dict:
     """Reason 阶段：由 LLM 结合长上下文自主决定直接回答或调用工具"""
     raw_layers, show_layers = get_layers()
-    raw_summary = [f"'{l['name']}' ({l['type']})" for l in raw_layers]
-    show_summary = [f"'{l['name']}' ({l['type']})" for l in show_layers]
+    raw_summary = [f"'{l['name']}' ({l['type']})" + (
+        f" [Dataset-ID: {l['dataset_id']}]" if l.get("dataset_id") else "") for l in raw_layers]
+    show_summary = [f"'{l['name']}' ({l['type']})" + (
+        f" [Layer-ID: {l['layer_id']}, Dataset-ID: {l['dataset_id']}]" if l.get("layer_id") else "")
+        for l in show_layers]
 
     system_prompt = f"""
     Du bist GeoGPT, ein autonomer und professioneller GIS-Agent.
@@ -54,7 +58,29 @@ def build_workflow(llm_with_tools, tools, get_layers):
     """Build the original graph with an already-bound model and explicit inputs."""
     workflow = StateGraph(AgentState)
     workflow.add_node("agent", partial(agent_reasoner, llm_with_tools=llm_with_tools, get_layers=get_layers))
-    workflow.add_node("tools", ToolNode(tools))
+    node = ToolNode(tools)
+
+    def one_call_state(state, call):
+        messages = list(state["messages"])
+        messages[-1] = messages[-1].model_copy(update={"tool_calls": [call]})
+        return {**state, "messages": messages}
+
+    def run_tools(state, config):
+        messages = []
+        for call in state["messages"][-1].tool_calls:
+            messages.extend(node.invoke(one_call_state(state, call), config)["messages"])
+        return {"messages": messages}
+
+    async def run_tools_async(state, config):
+        messages = []
+        for call in state["messages"][-1].tool_calls:
+            result = await node.ainvoke(one_call_state(state, call), config)
+            messages.extend(result["messages"])
+        return {"messages": messages}
+
+    # ToolNode still executes/validates each tool, but a model batch is ordered
+    # explicitly in sync AND async paths rather than relying on the prompt.
+    workflow.add_node("tools", RunnableLambda(run_tools, afunc=run_tools_async))
     workflow.add_edge(START, "agent")
     workflow.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
     workflow.add_edge("tools", "agent")
@@ -69,8 +95,8 @@ def create_agent_app(llm, tools, get_layers):
 class AgentRuntime:
     """Small lazy compatibility runtime, with one model/binding/graph per instance.
 
-    This only protects runtime construction, NOT the legacy layer bus or session
-    execution. It does not provide business-state isolation or transactions.
+    The initialization lock only protects construction. Session-bound tools own
+    their data and enforce single-tool atomic publication separately.
     """
 
     def __init__(self, model_factory, tools, get_layers):
@@ -110,3 +136,6 @@ class AgentRuntime:
 
     def invoke(self, *args, **kwargs):
         return self.app.invoke(*args, **kwargs)
+
+    async def ainvoke(self, *args, **kwargs):
+        return await self.app.ainvoke(*args, **kwargs)

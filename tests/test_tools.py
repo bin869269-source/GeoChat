@@ -76,7 +76,8 @@ def test_visualize(backend, bind, points, kind):
     args = {"layer_name": "POINTS", "map_type": kind, "data_field": "value"}
     assert "Erfolg" in backend.visualize_layer_on_map.invoke(args)
     assert "Erfolg" in backend.visualize_layer_on_map.invoke(args)
-    assert raw == [before] and len(shown) == 2
+    assert raw[0]["data"] == before["data"] and raw[0]["name"] == before["name"]
+    assert raw[0]["type"] == before["type"] and len(shown) == 2
     assert shown[0]["name"] != shown[1]["name"]
     assert shown[0]["data"] == points["data"] and shown[0]["type"] == kind
     assert shown[0]["data_field"] == "value"

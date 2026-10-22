@@ -8,13 +8,21 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from tests.conftest import ROOT
 
 
+def make_app(backend):
+    from streamlit.testing.v1 import AppTest
+    app = AppTest.from_file(str(ROOT / "frontend.py"), default_timeout=30)
+    app.session_state.business_session = backend.session
+    app.session_state.session_agent = backend
+    return app.run()
+
+
 def test_missing_credential_blocks_creation_not_import(backend, monkeypatch):
     # Approved Phase 3C change: import is credential-free, actual creation is not.
     monkeypatch.delenv("DEEPSEEK_API_KEY")
     spec = importlib.util.spec_from_file_location("backend_no_key", ROOT / "backend.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert module._runtime._model is None
+    assert module.create_agent_session()._runtime._model is None
     with pytest.raises(ValueError, match="DEEPSEEK_API_KEY wurde nicht gefunden"):
         module.create_llm()
 
@@ -78,36 +86,38 @@ def test_partial_state_survives_later_llm_error(backend, bind, points, monkeypat
     monkeypatch.setattr(backend.llm_with_tools, "invoke", invoke)
     with pytest.raises(RuntimeError, match="synthetic later failure"):
         backend.agent_app.invoke({"messages": [HumanMessage(content="partial")]})
-    assert len(shown) == 1  # Characterization; transactional behavior is a later decision.
+    assert len(shown) == 1  # Successful tools survive a later Agent failure.
 
 
 def test_state_reference_and_reset(backend, points):
     raw, shown = [points], []
     backend.set_agent_context(raw, shown)
     got_raw, got_shown = backend.get_agent_layers()
-    assert got_raw is raw and got_shown is shown
+    assert got_raw is backend.session.raw_view and got_shown is backend.session.map_view
+    assert raw == [points] and shown == []
     backend.visualize_layer_on_map.invoke({"layer_name": "points"})
-    assert len(shown) == 1 and raw == [points]
+    assert len(got_shown) == 1 and raw == [points] and shown == []
     backend.set_agent_context([], [])
     assert backend.get_agent_layers() == ([], [])
 
 
-def test_current_global_context_replacement(backend, points, polygons):
+def test_explicit_context_replacement(backend, points, polygons):
     a_raw, a_shown, b_raw, b_shown = [points], [], [polygons], []
     backend.set_agent_context(a_raw, a_shown)
     backend.set_agent_context(b_raw, b_shown)
-    assert backend.get_agent_layers()[0] is b_raw
+    assert backend.get_agent_layers()[0][0]["data"] == b_raw[0]["data"]
     backend.visualize_layer_on_map.invoke({"layer_name": "polygons"})
-    assert len(b_shown) == 1 and not a_shown
+    assert len(backend.get_agent_layers()[1]) == 1 and not a_shown and not b_shown
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="KD-SESSION: process-global context replaces session A with B")
 def test_independent_sessions_must_not_cross_write(backend, points):
     # Deterministic interleaving of A-start, B-start, A-tool: no timing race required.
-    a_shown, b_shown = [], []
-    backend.set_agent_context([copy.deepcopy(points)], a_shown)
-    backend.set_agent_context([copy.deepcopy(points)], b_shown)
-    output = backend.visualize_layer_on_map.invoke({"layer_name": "points"})  # A's pending tool
+    a = backend.create_agent_session()
+    b = backend.create_agent_session()
+    a.set_agent_context([copy.deepcopy(points)], [])
+    b.set_agent_context([copy.deepcopy(points)], [])
+    a_shown, b_shown = a.get_agent_layers()[1], b.get_agent_layers()[1]
+    output = a.visualize_layer_on_map.invoke({"layer_name": "points"})  # A's pending tool
     if "Erfolg" not in output:
         pytest.fail("Visualization failed before session isolation assertion: " + output)
     assert len(a_shown) == 1 and b_shown == []
@@ -115,22 +125,21 @@ def test_independent_sessions_must_not_cross_write(backend, points):
 
 def test_streamlit_server_layer_management(backend, points, polygons):
     from streamlit.testing.v1 import AppTest
-    app = AppTest.from_file(str(ROOT / "frontend.py"), default_timeout=30).run()
+    app = make_app(backend)
     assert not app.exception
-    app.session_state.layers = [dict(points, file_id="synthetic.csv")]
+    backend.set_agent_context([dict(points, file_id="synthetic.csv")], [polygons])
     app.session_state.processed_files = {"synthetic.csv"}
-    app.session_state.show_layers = [polygons]
     app.run()
-    app.button(key="del_raw_0").click().run()
-    assert not app.exception and app.session_state.layers == []
-    assert app.session_state.processed_files == set() and len(app.session_state.show_layers) == 1
-    app.button(key="del_map_0").click().run()
-    assert not app.exception and app.session_state.show_layers == []
-    app.session_state.layers = [points]
+    next(b for b in app.button if b.key.startswith("del_raw_")).click().run()
+    assert not app.exception and app.session_state.business_session.raw_view == []
+    assert app.session_state.processed_files == set() and len(app.session_state.business_session.map_view) == 1
+    next(b for b in app.button if b.key.startswith("del_map_")).click().run()
+    assert not app.exception and app.session_state.business_session.map_view == []
+    backend.set_agent_context([points], [])
     app.session_state.messages = [{"role": "user", "content": "synthetic"}]
     app.run()
     next(b for b in app.button if b.label == "🗑️ Chat & Sitzung zurücksetzen").click().run()
-    assert not app.exception and app.session_state.layers == [] and app.session_state.messages == []
+    assert not app.exception and app.session_state.business_session.raw_view == [] and app.session_state.messages == []
     assert app.session_state.agent_msg_history == []
 
 
@@ -144,8 +153,8 @@ def test_streamlit_html_export_gateway(backend, polygons, tmp_path, monkeypatch)
         downloads.append((label, data, kwargs))
         return original_download(label, data, **kwargs)
     monkeypatch.setattr(st, "download_button", record_download)
-    app = AppTest.from_file(str(ROOT / "frontend.py"), default_timeout=30).run()
-    app.session_state.show_layers = [polygons]
+    app = make_app(backend)
+    backend.set_agent_context([], [polygons])
     app.run()
     next(b for b in app.button if b.label == "Karte als HTML exportieren").click().run()
     assert not app.exception
@@ -161,10 +170,10 @@ def test_streamlit_chat_gateway_and_current_history(backend, points, monkeypatch
     from streamlit.testing.v1 import AppTest
     install_script(backend, monkeypatch, [
         call("visualize_layer_on_map", {"layer_name": "points", "map_type": "points"}, 1), None])
-    app = AppTest.from_file(str(ROOT / "frontend.py"), default_timeout=30).run()
-    app.session_state.layers = [points]
+    app = make_app(backend)
+    backend.set_agent_context([points], [])
     app.chat_input[0].set_value("show synthetic points").run()
-    assert not app.exception and len(app.session_state.show_layers) == 1
+    assert not app.exception and len(app.session_state.business_session.map_view) == 1
     assert app.session_state.messages[-1] == {"role": "assistant", "content": "finished"}
     # Current frontend retains only user + final AI, losing intermediate tool
     # messages. Keep this characterization separate from future history design.

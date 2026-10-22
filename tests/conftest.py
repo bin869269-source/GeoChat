@@ -1,4 +1,4 @@
-"""Import the unmodified backend behind explicit credential/network boundaries."""
+"""Create explicit session-bound adapters behind credential/network boundaries."""
 import importlib.util
 import io
 import json
@@ -93,9 +93,9 @@ def backend(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, "backend", module)
     spec.loader.exec_module(module)
-    module.set_agent_context([], [])
-    yield module
-    module.set_agent_context([], [])
+    bound = module.create_agent_session()
+    yield bound
+    bound.session.reset()
 
 
 @pytest.fixture
@@ -115,5 +115,5 @@ def bind(backend):
     def set_layers(*raw, shown=None):
         raw_list, shown_list = list(raw), [] if shown is None else shown
         backend.set_agent_context(raw_list, shown_list)
-        return raw_list, shown_list
+        return backend.get_agent_layers()
     return set_layers

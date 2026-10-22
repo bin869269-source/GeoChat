@@ -9,7 +9,8 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END
 
-from agent import graph, llm, tools
+from agent import graph, llm
+from agent import tools as tool_module
 from tests.conftest import ROOT
 
 
@@ -37,11 +38,9 @@ def tool_call(name, args, number):
         "name": name, "args": args, "id": str(number), "type": "tool_call"}])
 
 
-@pytest.fixture(autouse=True)
-def clear_legacy_bus():
-    tools.set_agent_context([], [])
-    yield
-    tools.set_agent_context([], [])
+@pytest.fixture
+def tools(backend):
+    return backend
 
 
 def test_agent_imports_and_mock_workflow_without_backend_or_key():
@@ -79,7 +78,10 @@ def test_agent_imports_and_mock_workflow_without_backend_or_key():
             def invoke(self, messages):
                 return AIMessage(content="offline done")
         model = Model()
-        app = agent.graph.create_agent_app(model, agent.tools.TOOLS, agent.tools.get_agent_layers)
+        from core.session import SessionData
+        session = SessionData()
+        registered = agent.tools.create_tools(session)
+        app = agent.graph.create_agent_app(model, registered, session.get_agent_layers)
         result = app.invoke({"messages":[HumanMessage(content="synthetic")]})
         assert result["messages"][-1].content == "offline done" and model.count == 1
         assert not attempts
@@ -181,7 +183,7 @@ def test_metadata_default_model_is_created_only_on_call(monkeypatch):
     assert calls == ["created"]
 
 
-def test_runtime_constructs_and_binds_compiles_once(monkeypatch):
+def test_runtime_constructs_and_binds_compiles_once(monkeypatch, tools):
     model = ScriptedModel([AIMessage(content="one"), AIMessage(content="two")])
     factories, compilations = [], []
     original_compile = graph.StateGraph.compile
@@ -204,7 +206,7 @@ def test_runtime_constructs_and_binds_compiles_once(monkeypatch):
     assert factories == ["created"] and model.bind_count == 1 and len(compilations) == 1
 
 
-def test_runtime_concurrent_initialization_reuses_one_app():
+def test_runtime_concurrent_initialization_reuses_one_app(tools):
     from concurrent.futures import ThreadPoolExecutor
     model = ScriptedModel([])
     factories = []
@@ -218,7 +220,7 @@ def test_runtime_concurrent_initialization_reuses_one_app():
     assert factories == ["created"] and model.bind_count == 1
 
 
-def test_graph_topology_and_tool_registry():
+def test_graph_topology_and_tool_registry(tools):
     model = ScriptedModel([])
     app = graph.create_agent_app(model, tools.TOOLS, tools.get_agent_layers)
     view = app.get_graph()
@@ -234,7 +236,7 @@ def test_original_conditional_route(calls, expected):
     assert graph.should_continue({"messages": [message]}) == expected
 
 
-def test_prompt_reads_current_layers_and_preserves_tool_messages(points, polygons):
+def test_prompt_reads_current_layers_and_preserves_tool_messages(points, polygons, tools):
     seen = []
     model = SimpleNamespace(invoke=lambda messages: (seen.append(messages) or AIMessage(content="done")))
     tools.set_agent_context([points], [polygons])
@@ -250,9 +252,10 @@ def test_prompt_reads_current_layers_and_preserves_tool_messages(points, polygon
     assert "'points'" not in seen[1][0].content and "Keine" in seen[1][0].content
 
 
-def test_single_step_graph_direct_tools(points):
+def test_single_step_graph_direct_tools(points, tools):
     shown = []
     tools.set_agent_context([points], shown)
+    shown = tools.get_agent_layers()[1]
     model = ScriptedModel([tool_call("visualize_layer_on_map", {"layer_name": "points", "map_type": "points"}, 1),
                            AIMessage(content="done")])
     result = graph.create_agent_app(model, tools.TOOLS, tools.get_agent_layers).invoke({
@@ -262,9 +265,10 @@ def test_single_step_graph_direct_tools(points):
     assert any(isinstance(m, ToolMessage) and "Erfolg" in m.content for m in result["messages"])
 
 
-def test_multistep_fetch_buffer_style(polygons, monkeypatch):
+def test_multistep_fetch_buffer_style(polygons, monkeypatch, tools):
     shown = []
     tools.set_agent_context([], shown)
+    shown = tools.get_agent_layers()[1]
     monkeypatch.setattr(tools.requests, "get", lambda *a, **k: SimpleNamespace(
         status_code=200, json=lambda: polygons["data"]))
     model = ScriptedModel([
@@ -280,7 +284,7 @@ def test_multistep_fetch_buffer_style(polygons, monkeypatch):
     assert len(model.seen) == 4 and model.bind_count == 1
 
 
-def test_error_feedback_returns_to_model():
+def test_error_feedback_returns_to_model(tools):
     model = ScriptedModel([tool_call("calculate_buffer_analysis", {"layer_name": "missing"}, 1),
                            AIMessage(content="failed task explained")])
     result = graph.create_agent_app(model, tools.TOOLS, tools.get_agent_layers).invoke({
@@ -290,19 +294,20 @@ def test_error_feedback_returns_to_model():
     assert tools.get_agent_layers() == ([], [])
 
 
-def test_facade_reuses_models_and_only_one_layer_bus(backend):
-    assert backend.TOOLS is tools.TOOLS and backend._SHARED_LAYER_BUS is tools._SHARED_LAYER_BUS
+def test_facade_reuses_models_and_explicit_session(backend, tools):
+    assert backend.TOOLS is tools.TOOLS and backend.session is tools.session
     for tool in tools.TOOLS:
         assert getattr(backend, tool.name) is tool
     raw, shown = [], []
     backend.set_agent_context(raw, shown)
-    assert tools.get_agent_layers()[0] is raw and tools.get_agent_layers()[1] is shown
+    assert tools.get_agent_layers()[0] is backend.session.raw_view
+    assert tools.get_agent_layers()[1] is backend.session.map_view
     assert backend.llm is backend._runtime.model
     assert backend.llm_with_tools is backend._runtime.bound_model
     assert backend.workflow is backend._runtime.workflow
 
 
-def test_tools_delegate_buffer_area_density(points, polygons, monkeypatch):
+def test_tools_delegate_buffer_area_density(points, polygons, monkeypatch, tools):
     calls = []
     buffer = tools.buffer_geometries
     area = tools.gis_statistics.calculate_area
@@ -312,7 +317,7 @@ def test_tools_delegate_buffer_area_density(points, polygons, monkeypatch):
             calls.append(name)
             return implementation(*args, **kwargs)
         return invoke
-    monkeypatch.setattr(tools, "buffer_geometries", spy("buffer", buffer))
+    monkeypatch.setattr(tool_module, "buffer_geometries", spy("buffer", buffer))
     monkeypatch.setattr(tools.gis_statistics, "calculate_area", spy("area", area))
     monkeypatch.setattr(tools.gis_statistics, "calculate_density", spy("density", density))
     tools.set_agent_context([points, polygons], [])
@@ -354,7 +359,7 @@ def test_facade_metadata_reasoner_and_graph_reuse_one_model(backend, monkeypatch
     ("update_map_style", {"layer_name": "missing"}, "nicht gefunden"),
     ("calculate_feature_distances", {"layer_name": "missing"}, "nicht gefunden"),
 ])
-def test_all_seven_tools_bind_dispatch_and_return_feedback(name, args, expected, monkeypatch):
+def test_all_seven_tools_bind_dispatch_and_return_feedback(name, args, expected, monkeypatch, tools):
     monkeypatch.setattr(tools.requests, "get", lambda *a, **k: SimpleNamespace(status_code=503))
     model = ScriptedModel([tool_call(name, args, 1), AIMessage(content="handled")])
     result = graph.create_agent_app(model, tools.TOOLS, tools.get_agent_layers).invoke({

@@ -124,5 +124,5 @@ def test_map_empty_basemap_and_view(backend, polygons):
 def test_style_reaches_html(backend, bind, polygons):
     bind(shown=[polygons])
     backend.update_map_style.invoke({"layer_name": "polygons", "color": "red", "weight": 4, "fill_opacity": 0.25})
-    html = backend.create_layered_map([polygons]).get_root().render()
+    html = backend.create_layered_map(backend.get_agent_layers()[1]).get_root().render()
     assert '"color": "red"' in html and '"fillOpacity": 0.25' in html and '"weight": 4' in html

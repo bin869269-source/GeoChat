@@ -10,11 +10,10 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 # 从重构后的 backend 导入核心 Agent 与地图功能
 from backend import (
-    agent_app,
-    set_agent_context,
+    create_agent_session,
+    SessionData,
     create_layered_map,
     parse_uploaded_file,
-    smart_analyze_geodata,
     DEFAULT_MAP_STYLE,
     Titel_hinzufügen,
     render_map_html
@@ -29,14 +28,16 @@ st.markdown("## 🌍 GeoGPT: Autonomer GIS Agent")
 # ==========================================
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "layers" not in st.session_state:
-    st.session_state.layers = []            # 用户上传的原始数据图层池
-if "show_layers" not in st.session_state:
-    st.session_state.show_layers = []       # 最终呈现在地图上的矢量/统计图层
+if "business_session" not in st.session_state:
+    st.session_state.business_session = SessionData()
+if "session_agent" not in st.session_state:
+    st.session_state.session_agent = create_agent_session(st.session_state.business_session)
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = set()
 if "map_key" not in st.session_state:
     st.session_state.map_key = 0            # 控制 Folium 物理强制重绘
+if "upload_key" not in st.session_state:
+    st.session_state.upload_key = 0         # 重置时清除仍选中的上传文件
 if "Karte_Titel" not in st.session_state:
     st.session_state.Karte_Titel = ""
 if "show_basemap" not in st.session_state:
@@ -53,15 +54,15 @@ with st.sidebar:
 
     # 1. 查看与删除上传的原始数据
     with st.expander("📁 Hochgeladene Rohdaten", expanded=True):
-        if st.session_state.layers:
-            for i, layer in enumerate(st.session_state.layers):
+        if st.session_state.business_session.raw_view:
+            for i, layer in enumerate(st.session_state.business_session.raw_view):
                 col_name, col_delete = st.columns([4, 1])
                 with col_name:
                     st.write(f"**{i + 1}.** {layer['name']} (`{layer['type']}`)")
                 with col_delete:
-                    if st.button("✕", key=f"del_raw_{i}"):
+                    if st.button("✕", key=f"del_raw_{layer['dataset_id']}"):
                         deleted_file_id = layer.get("file_id", layer["name"])
-                        st.session_state.layers.pop(i)
+                        st.session_state.business_session.remove_upload(layer["dataset_id"])
                         st.session_state.processed_files.discard(deleted_file_id)
                         st.session_state.map_key += 1
                         st.rerun()
@@ -70,14 +71,14 @@ with st.sidebar:
 
     # 2. 查看与删除地图已渲染的图层
     with st.expander("📍 Aktive Kartenlayer", expanded=True):
-        if st.session_state.show_layers:
-            for i, layer in enumerate(st.session_state.show_layers):
+        if st.session_state.business_session.map_view:
+            for i, layer in enumerate(st.session_state.business_session.map_view):
                 col_name, col_delete = st.columns([4, 1])
                 with col_name:
                     st.write(f"**{i + 1}.** {layer['name']} (`{layer['type']}`)")
                 with col_delete:
-                    if st.button("✕", key=f"del_map_{i}"):
-                        st.session_state.show_layers.pop(i)
+                    if st.button("✕", key=f"del_map_{layer['layer_id']}"):
+                        st.session_state.business_session.remove_layer(layer["layer_id"])
                         st.session_state.map_key += 1
                         st.rerun()
         else:
@@ -89,12 +90,12 @@ with st.sidebar:
     st.markdown("### 💾 Export")
     if st.button("Karte als HTML exportieren"):
         m_export = create_layered_map(
-            st.session_state.show_layers,
+            st.session_state.business_session.map_view,
             show_basemap=st.session_state.show_basemap
         )
         if st.session_state.Karte_Titel:
             Titel_hinzufügen(m_export, st.session_state.Karte_Titel)
-        
+
         st.download_button(
             "📥 HTML-Datei herunterladen",
             render_map_html(m_export),
@@ -103,7 +104,7 @@ with st.sidebar:
         )
 
     st.markdown("---")
-    
+
     # 4. 底图开关与全局重置
     st.session_state.show_basemap = st.checkbox(
         "OpenStreetMap Basemap anzeigen",
@@ -113,10 +114,10 @@ with st.sidebar:
     if st.button("🗑️ Chat & Sitzung zurücksetzen"):
         st.session_state.messages = []
         st.session_state.agent_msg_history = []
-        st.session_state.layers = []
-        st.session_state.show_layers = []
+        st.session_state.business_session.reset()
         st.session_state.processed_files = set()
         st.session_state.map_key += 1
+        st.session_state.upload_key += 1
         st.session_state.Karte_Titel = ""
         st.rerun()
 
@@ -133,7 +134,8 @@ with col1:
     uploaded_files = st.file_uploader(
         "Geodaten hochladen (GeoJSON, JSON, CSV):",
         type=["json", "csv", "geojson"],
-        accept_multiple_files=True
+        accept_multiple_files=True,
+        key=f"uploads_{st.session_state.upload_key}"
     )
 
     if uploaded_files:
@@ -156,20 +158,16 @@ with col1:
                             sample_str = json.dumps(raw_data, ensure_ascii=False)[:1000]
 
                         # 3. 调用元数据提取专家分析
-                        analysis = smart_analyze_geodata(uploaded_file.name, sample_str)
+                        analysis = st.session_state.session_agent.smart_analyze_geodata(uploaded_file.name, sample_str)
                         detected_type = analysis.get("detected_type", parsed_data["type"])
                         detected_fields = analysis.get("data_fields", [])
                         recommended_name = analysis.get("recommended_layer_name", uploaded_file.name)
 
                         # 4. 存入原始数据池
-                        new_raw_layer = {
-                            "name": recommended_name,
-                            "type": detected_type,
-                            "data": raw_data,
-                            "data_fields": detected_fields,
-                            "file_id": file_id
-                        }
-                        st.session_state.layers.append(new_raw_layer)
+                        st.session_state.business_session.add_upload(
+                            recommended_name, raw_data, file_id=file_id,
+                            renderer=detected_type, data_fields=detected_fields
+                        )
                         st.session_state.processed_files.add(file_id)
 
                         st.success(f"Erfolgreich geladen: **{recommended_name}** ({detected_type})")
@@ -196,7 +194,7 @@ with col2:
 
     # 动态构建地图并注入标题
     m = create_layered_map(
-        st.session_state.show_layers,
+        st.session_state.business_session.map_view,
         show_basemap=st.session_state.show_basemap
     )
     if st.session_state.Karte_Titel:
@@ -223,23 +221,16 @@ if user_query:
 
     with st.spinner("🤖 GeoGPT überlegt und führt Werkzeuge aus..."):
         try:
-            # 2. 将全局数据指针挂载到 Agent 工具运行环境
-            set_agent_context(
-                raw_layers=st.session_state.layers,
-                show_layers=st.session_state.show_layers
-            )
-
-            # 3. 执行端到端的 LangGraph 状态图 (ReAct Loop)
-            # Agent 会自主调用工具、执行计算、更新 show_layers，并在推理结束后返回最终文本
+            # Agent 工具已绑定当前会话；每个工具验证后原子提交，后续步骤可读取结果。
             graph_input = {
                 "messages": st.session_state.agent_msg_history
             }
-            final_state = agent_app.invoke(graph_input)
+            final_state = st.session_state.session_agent.agent_app.invoke(graph_input)
 
             # 4. 同步消息历史与输出
             final_ai_msg = final_state["messages"][-1]
             st.session_state.agent_msg_history.append(final_ai_msg)
-            
+
             output_text = final_ai_msg.content
             st.session_state.messages.append({"role": "assistant", "content": output_text})
 

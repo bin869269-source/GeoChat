@@ -22,9 +22,9 @@ def test_missing_density_input_is_error(backend, bind, polygons):
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason="KD-WEIGHT: if weight rejects zero")
 def test_zero_line_weight(backend, bind, polygons):
     polygons["folium_kwargs"] = {"weight": 2}
-    bind(shown=[polygons])
+    _, shown = bind(shown=[polygons])
     backend.update_map_style.invoke({"layer_name": "polygons", "weight": 0})
-    assert polygons["folium_kwargs"]["weight"] == 0
+    assert shown[0]["folium_kwargs"]["weight"] == 0
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason="KD-FEATURE: single Feature renders no points")
