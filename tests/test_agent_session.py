@@ -134,14 +134,26 @@ def test_streamlit_server_layer_management(backend, points, polygons):
 
 
 def test_streamlit_html_export_gateway(backend, polygons, tmp_path, monkeypatch):
+    import streamlit as st
     from streamlit.testing.v1 import AppTest
-    monkeypatch.chdir(tmp_path)  # Existing production disk export is confined to test temp storage.
+    monkeypatch.chdir(tmp_path)
+    downloads = []
+    original_download = st.download_button
+    def record_download(label, data, **kwargs):
+        downloads.append((label, data, kwargs))
+        return original_download(label, data, **kwargs)
+    monkeypatch.setattr(st, "download_button", record_download)
     app = AppTest.from_file(str(ROOT / "frontend.py"), default_timeout=30).run()
     app.session_state.show_layers = [polygons]
     app.run()
     next(b for b in app.button if b.label == "Karte als HTML exportieren").click().run()
     assert not app.exception
-    assert "L.geoJson(" in (tmp_path / "map_export.html").read_text(encoding="utf-8")
+    assert len(downloads) == 1
+    label, payload, options = downloads[0]
+    assert label == "📥 HTML-Datei herunterladen"
+    assert isinstance(payload, bytes) and "L.geoJson(" in payload.decode("utf-8")
+    assert options == {"file_name": "geogpt_map.html", "mime": "text/html"}
+    assert not (tmp_path / "map_export.html").exists()
 
 
 def test_streamlit_chat_gateway_and_current_history(backend, points, monkeypatch):

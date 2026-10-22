@@ -16,7 +16,8 @@ from backend import (
     parse_uploaded_file,
     smart_analyze_geodata,
     DEFAULT_MAP_STYLE,
-    Titel_hinzufügen
+    Titel_hinzufügen,
+    render_map_html
 )
 
 # 页面基础配置
@@ -94,15 +95,12 @@ with st.sidebar:
         if st.session_state.Karte_Titel:
             Titel_hinzufügen(m_export, st.session_state.Karte_Titel)
         
-        html_path = "map_export.html"
-        m_export.save(html_path)
-        with open(html_path, "rb") as f:
-            st.download_button(
-                "📥 HTML-Datei herunterladen",
-                f.read(),
-                file_name="geogpt_map.html",
-                mime="text/html"
-            )
+        st.download_button(
+            "📥 HTML-Datei herunterladen",
+            render_map_html(m_export),
+            file_name="geogpt_map.html",
+            mime="text/html"
+        )
 
     st.markdown("---")
     
