@@ -34,6 +34,7 @@ class AcceptanceModel:
     """Scripted responses, not a language model or a substitute GIS engine."""
     def __init__(self):
         self.sequence = 0
+        self.metadata_samples = []
 
     def bind_tools(self, tools):
         assert tuple(t.name for t in tools) == TOOL_NAMES
@@ -42,6 +43,10 @@ class AcceptanceModel:
     def invoke(self, messages):
         from langchain_core.messages import AIMessage
         filename = messages[-1].content.split("Datei: ", 1)[1].splitlines()[0]
+        def invalid_constant(token):
+            raise ValueError("Non-standard metadata JSON constant: " + token)
+        sample = json.loads(messages[-1].content.split("Auszug:\n", 1)[1], parse_constant=invalid_constant)
+        self.metadata_samples.append({"filename": filename, "sample": sample})
         return AIMessage(content=json.dumps({
             "detected_type": "points" if filename.endswith((".csv", ".json")) else "geojson",
             "data_fields": ["value"], "recommended_layer_name": Path(filename).stem}))
@@ -114,6 +119,7 @@ def run_acceptance_app():
                     "layers": [asdict(x) for x in session.layers.values()],
                     "results": [asdict(x) for x in session.results],
                     "messages": st.session_state.messages,
+                    "metadata_samples": getattr(st.session_state.session_agent._runtime._model, "metadata_samples", []),
                     "tools": [t.name for t in st.session_state.session_agent.TOOLS],
                     "raw_count": len(session.raw_view)}
             dest = Path(os.environ["PHASE4A_OUT"]) / "snapshots" / (session.session_id + ".json")
@@ -447,11 +453,43 @@ def main():
         record("UPLOAD-ERRORS","Passed","Malformed JSON and missing CSV lat/lon give visible errors; no dataset created")
         click(a,"🗑️ Chat & Sitzung zurücksetzen")
         wait_for(lambda:"bad.csv" not in body(a))
+        # Streamlit can rerun after an upload and remove its one-run success
+        # alert before the next CDP poll. Observe the real DOM before uploading;
+        # retain the same success assertion without requiring it to persist.
+        cdp.js(a,"""(()=>{
+          window.__numericUploadUI={success:false,errors:[],messages:[]};
+          window.__numericUploadObserver=new MutationObserver(()=>{
+            for(const node of document.querySelectorAll('[data-testid=stAlert]')){
+              const text=node.innerText;
+              if(text.includes('Erfolgreich geladen: numeric (points)')){
+                window.__numericUploadUI.success=true;
+                if(!window.__numericUploadUI.messages.includes(text))window.__numericUploadUI.messages.push(text);
+              }
+              if(text.includes("Fehler beim Parsen von 'numeric.csv'")){
+                if(!window.__numericUploadUI.errors.includes(text))window.__numericUploadUI.errors.push(text);
+              }
+            }
+          });
+          window.__numericUploadObserver.observe(document.body,{subtree:true,childList:true,characterData:true});
+        })()""")
         upload(a,["numeric.csv"])
-        wait_for(lambda:"int64" in body(a) and "not JSON serializable" in body(a))
-        assert not snapshot(aid)["datasets"]
-        screenshot(a,"06-numeric-csv-known-defect")
-        record("KD-CSV-METADATA","Known Defect","Actual browser numeric-only CSV fails before model metadata with numpy int64 JSON serialization; no dataset published")
+        numeric_state=wait_for(lambda:(s if len((s:=snapshot(aid))["datasets"])==1 else None))
+        wait_for(lambda:cdp.js(a,"window.__numericUploadUI.success"))
+        upload_ui=cdp.js(a,"window.__numericUploadUI")
+        assert upload_ui["success"] and upload_ui["messages"] and upload_ui["errors"]==[]
+        (out/"numeric-upload-ui.json").write_text(json.dumps(upload_ui,ensure_ascii=False,indent=2),encoding="utf-8")
+        cdp.js(a,"window.__numericUploadObserver.disconnect()")
+        assert "not JSON serializable" not in body(a) and "Fehler beim Parsen" not in body(a)
+        assert numeric_state["datasets"][0]["name"]=="numeric"
+        assert numeric_state["datasets"][0]["metadata"]["data_fields"]==["value"]
+        assert numeric_state["layers"]==[] and numeric_state["results"]==[]
+        assert numeric_state["metadata_samples"][-1]["filename"]=="numeric.csv"
+        sample=numeric_state["metadata_samples"][-1]["sample"]
+        assert sample==[{"name":"Point 1","lat":51.0,"lon":9.0,"properties":{"value":3}}]
+        assert type(sample[0]["properties"]["value"]) is int
+        assert snapshot(bid)==other
+        screenshot(a,"06-numeric-csv-fixed")
+        record("KD-CSV-METADATA","Passed","Former defect fixed: real numeric CSV upload produces integer metadata and registers one Dataset; no new Layer/result or cross-session change")
         # Title is a renderer API; the production page has no editable title widget.
         from maps.renderer import create_layered_map, Titel_hinzufügen, render_map_html
         title_map=create_layered_map([{"name":"title_points","type":"points","data":[{"lat":51,"lon":9,"name":"title point"}]}],show_basemap=False)

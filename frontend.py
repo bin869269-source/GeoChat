@@ -3,12 +3,11 @@
 # frontend.py - Streamlit Interface for Autonomous ReAct GIS Agent
 # ==============================================================================
 import streamlit as st
-import json
 from streamlit_folium import st_folium
 from langchain_core.messages import HumanMessage, AIMessage
 
 from agent.graph import create_agent_session
-from agent.llm import smart_analyze_geodata
+from agent.llm import smart_analyze_geodata, serialize_metadata_sample
 from core.session import SessionData
 from gis.data_io import parse_uploaded_file
 from maps.renderer import (
@@ -147,13 +146,7 @@ with col1:
                         raw_data = parsed_data["data"]
 
                         # 2. 采样切片供 LLM 进行特征盲审
-                        if isinstance(raw_data, list):
-                            sample_str = json.dumps(raw_data[:3], ensure_ascii=False)
-                        elif isinstance(raw_data, dict) and "features" in raw_data:
-                            sample_features = raw_data.get("features", [])[:2]
-                            sample_str = json.dumps({"type": "FeatureCollection", "features": sample_features}, ensure_ascii=False)
-                        else:
-                            sample_str = json.dumps(raw_data, ensure_ascii=False)[:1000]
+                        sample_str = serialize_metadata_sample(raw_data)
 
                         # 3. 调用元数据提取专家分析
                         analysis = smart_analyze_geodata(

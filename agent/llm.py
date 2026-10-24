@@ -3,10 +3,46 @@
 Importing this module neither reads credentials nor constructs a model.
 """
 import json
+import math
 import os
 from pathlib import Path
 
+import numpy as np
 from langchain_core.messages import HumanMessage, SystemMessage
+
+
+def serialize_metadata_sample(data) -> str:
+    """Encode the existing upload preview without changing its source data.
+
+    Keep three list entries, two FeatureCollection features, or the existing
+    1000-character fallback. NumPy numeric/bool scalars become Python scalars;
+    missing/non-finite floating values become null only in this AI preview.
+    Unsupported objects remain errors rather than being stringified. The
+    fallback may still truncate JSON, matching the existing sampling policy.
+    """
+    def compatible(value):
+        if isinstance(value, (np.integer, np.floating, np.bool_)):
+            value = value.item()
+            if isinstance(value, np.generic):
+                raise TypeError("Extended-precision metadata scalar cannot be encoded losslessly")
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        if isinstance(value, dict):
+            return {key: compatible(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [compatible(item) for item in value]
+        return value
+
+    truncate = False
+    if isinstance(data, list):
+        sample = data[:3]
+    elif isinstance(data, dict) and "features" in data:
+        sample = {"type": "FeatureCollection", "features": data.get("features", [])[:2]}
+    else:
+        sample = data
+        truncate = True
+    text = json.dumps(compatible(sample), ensure_ascii=False, allow_nan=False)
+    return text[:1000] if truncate else text
 
 
 def create_llm(api_key=None):

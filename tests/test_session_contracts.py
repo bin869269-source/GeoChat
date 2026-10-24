@@ -399,8 +399,6 @@ def test_frontend_reset_rekeys_uploader_to_prevent_immediate_reimport(session_ag
     assert app.session_state.processed_files == set() and seen_keys[-1] == "uploads_1"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="KD-CSV-METADATA: numeric-only CSV sampling contains non-JSON numpy int64")
 def test_numeric_only_csv_can_complete_frontend_upload(session_agent, monkeypatch):
     import streamlit
     from tests.conftest import upload
