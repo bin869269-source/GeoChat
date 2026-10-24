@@ -54,6 +54,9 @@ def create_tools(session: SessionData):
             used_dataset_ids.add(match["dataset_id"])
         return match
 
+    def input_frame(target):
+        return extract_features_to_gdf(target["data"], source_crs=target["crs"])
+
     @tool
     def fetch_city_boundary_osm(city_name: str) -> str:
         """
@@ -112,6 +115,8 @@ def create_tools(session: SessionData):
             available_names = [l["name"] for l in all_available]
             return f"Layer '{layer_name}' nicht gefunden. Verfügbar sind: {available_names}"
 
+        input_frame(target)  # Unknown/conflicting CRS must not become a successful layer.
+
         folium_kwargs = {
             "color": color,
             "weight": weight,
@@ -145,7 +150,7 @@ def create_tools(session: SessionData):
             return f"Layer '{layer_name}' nicht gefunden."
 
         try:
-            gdf = extract_features_to_gdf(target["data"])
+            gdf = input_frame(target)
             res_gdf = buffer_geometries(gdf, distance_meters)
             res_gdf = clean_gdf_for_geojson(res_gdf)
             tool_metrics["feature_count"] = len(res_gdf)
@@ -174,7 +179,7 @@ def create_tools(session: SessionData):
             return f"Polygon-Layer '{polygon_layer_name}' nicht gefunden."
 
         try:
-            gdf_poly = extract_features_to_gdf(poly_layer["data"])
+            gdf_poly = input_frame(poly_layer)
             gdf_poly = gis_statistics.calculate_area(gdf_poly)
 
             target_field = "area_km2"
@@ -183,7 +188,7 @@ def create_tools(session: SessionData):
             if point_layer_name:
                 pt_layer = resolve(pool, point_layer_name)
                 if pt_layer:
-                    gdf_pt = extract_features_to_gdf(pt_layer["data"])
+                    gdf_pt = input_frame(pt_layer)
                     gdf_poly = gis_statistics.calculate_density(gdf_poly, gdf_pt)
                     target_field = "dichte_pro_km2"
                     layer_suffix = "Dichte"
@@ -217,7 +222,7 @@ def create_tools(session: SessionData):
             return f"Layer '{layer_name}' nicht gefunden."
 
         try:
-            gdf = extract_features_to_gdf(target["data"])
+            gdf = gis_data_io.transform_geodata(input_frame(target), 4326)
             gdf["lon"] = gdf.geometry.x
             gdf["lat"] = gdf.geometry.y
 
@@ -291,7 +296,7 @@ def create_tools(session: SessionData):
 
         try:
             # 1. 转换为 GeoDataFrame
-            gdf = extract_features_to_gdf(target["data"])
+            gdf = input_frame(target)
             if len(gdf) < 2:
                 return f"Der Layer '{layer_name}' enthält weniger als 2 Objekte. Abstandsberechnung nicht möglich."
 

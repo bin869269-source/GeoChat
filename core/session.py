@@ -10,7 +10,8 @@ from dataclasses import replace
 import json
 from threading import RLock
 
-from .contracts import Dataset, Layer, ToolResult, new_id
+from .contracts import (Dataset, Layer, ToolResult, new_id, UNSPECIFIED_CRS,
+                        data_crs, normalize_crs, validate_dataset_crs)
 
 
 class AmbiguousReference(ValueError):
@@ -101,10 +102,11 @@ class SessionData:
             for key in self._uploads:
                 d = self._datasets[key]
                 raw.append({**deepcopy(d.metadata), "name": d.name, "type": d.metadata.get("type", "geojson"),
-                            "data": payloads[key], "dataset_id": key})
+                            "data": payloads[key], "dataset_id": key, "crs": d.crs})
             shown = [{"name": l.name, "type": l.renderer, "data": payloads[l.dataset_id],
                       "data_field": l.data_field, "folium_kwargs": deepcopy(l.style),
-                      "layer_id": l.layer_id, "dataset_id": l.dataset_id}
+                      "layer_id": l.layer_id, "dataset_id": l.dataset_id,
+                      "crs": self._datasets[l.dataset_id].crs}
                      for l in self._layers.values()]
             return raw, shown
 
@@ -117,14 +119,23 @@ class SessionData:
                 raise ValueError("Dataset ID already exists")
             if any(key not in self._datasets for key in dataset.parent_ids):
                 raise ValueError("Unknown parent dataset")
+            dataset = replace(dataset, crs=validate_dataset_crs(dataset))
             self._datasets[dataset.dataset_id] = self._copy_dataset(dataset)
             if uploaded:
                 self._uploads.append(dataset.dataset_id)
             return dataset.dataset_id
 
-    def add_upload(self, name, data, *, file_id=None, renderer="geojson", data_fields=()):
-        crs = str(data.crs) if getattr(data, "crs", None) is not None else (
-            None if hasattr(data, "geometry") else "EPSG:4326")
+    def add_upload(self, name, data, *, file_id=None, renderer="geojson", data_fields=(), crs=UNSPECIFIED_CRS):
+        """Own unmodified source data; optional crs is a declaration, not projection.
+
+        Omitted context reads native/GeoJSON declarations. Explicit None stays
+        unknown and cannot later become an implicit WGS84 tool input.
+        """
+        if crs is UNSPECIFIED_CRS:
+            crs = data_crs(data)
+            if crs is UNSPECIFIED_CRS:
+                crs = "EPSG:4326"  # Existing GeoJSON / lat-lon wire contract.
+        crs = normalize_crs(crs)
         d = Dataset(name, data, crs=crs, source=file_id or "upload", metadata={
             "type": renderer, "file_id": file_id or name, "data_fields": list(data_fields)})
         return self.add_dataset(d, uploaded=True)
@@ -174,12 +185,16 @@ class SessionData:
         by_identity = {}
         for entry in raw:
             key = replacement.add_upload(entry["name"], entry["data"], file_id=entry.get("file_id"),
-                                         renderer=entry.get("type", "geojson"), data_fields=entry.get("data_fields", ()))
+                                         renderer=entry.get("type", "geojson"), data_fields=entry.get("data_fields", ()),
+                                         crs=entry.get("crs", UNSPECIFIED_CRS))
             by_identity[id(entry["data"])] = key
         for entry in shown:
             key = by_identity.get(id(entry["data"]))
             if key is None:
-                key = replacement.add_dataset(Dataset(entry["name"], entry["data"], source="legacy-display"))
+                reference = entry["crs"] if "crs" in entry else data_crs(entry["data"])
+                if reference is UNSPECIFIED_CRS:
+                    reference = "EPSG:4326"
+                key = replacement.add_dataset(Dataset(entry["name"], entry["data"], crs=reference, source="legacy-display"))
                 by_identity[id(entry["data"])] = key
             replacement.add_layer(Layer(key, entry["name"], entry.get("type", "geojson"),
                                         entry.get("data_field"), deepcopy(entry.get("folium_kwargs", {}))))
@@ -206,7 +221,7 @@ class SessionData:
                 pass
             else:
                 return {"name": dataset.name, "type": dataset.metadata.get("type", "geojson"),
-                        "data": self._payload(dataset), "dataset_id": dataset.dataset_id}
+                        "data": self._payload(dataset), "dataset_id": dataset.dataset_id, "crs": dataset.crs}
         matches = [e for e in pool if e.get("dataset_id") == reference]
         if matches and not require_layer:
             # Multiple renderings still refer to one dataset. Prefer its raw
@@ -258,12 +273,15 @@ class SessionData:
                     # Serialization validates transport compatibility, not GIS correctness.
                     if hasattr(data, "to_json") and hasattr(data, "geometry"):
                         json.loads(data.to_json())
-                        crs = str(data.crs) if data.crs else None
+                        crs = entry["crs"] if "crs" in entry else (str(data.crs) if data.crs else None)
                     else:
                         json.dumps(data)
-                        crs = "EPSG:4326"
+                        crs = entry["crs"] if "crs" in entry else data_crs(data)
+                        if crs is UNSPECIFIED_CRS:
+                            crs = "EPSG:4326"
                     d = Dataset(entry["name"], deepcopy(data), crs, f"tool:{tool_name}", tuple(parent_ids),
                                 {"format": entry.get("_format", "collection")})
+                    d = replace(d, crs=validate_dataset_crs(d))
                     key = d.dataset_id
                     datasets[key] = d
                     payload_ids[id(data)] = key

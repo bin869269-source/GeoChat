@@ -10,6 +10,7 @@ import base64
 from collections import Counter
 import json
 import os
+import re
 from pathlib import Path
 import runpy
 import socket
@@ -18,6 +19,7 @@ import sys
 import time
 from types import SimpleNamespace
 import urllib.request
+import urllib.parse
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +30,56 @@ TOOL_NAMES = (
     "calculate_area_and_density", "run_machine_learning_spatial_prediction",
     "update_map_style", "calculate_feature_distances",
 )
+
+
+def classify_network_failures(events):
+    """Separate proven, already-loaded duplicate tile cancellations only.
+
+    Chrome can report an Other request for a PNG just loaded as an Image in
+    the same Folium frame, then cancel that duplicate immediately. Require
+    positive delivery evidence and tight timing; all other failures stay fatal.
+    """
+    frames, requests, responses, finished = {}, {}, {}, {}
+    expected, unexpected = [], []
+    for event in events:
+        method, params = event["method"], event["params"]
+        session = event.get("sessionId")
+        key = (session, params.get("requestId"))
+        if method == "Page.frameNavigated":
+            value = params["frame"]
+            frames[(session, value["id"])] = value.get("url", "")
+        elif method == "Network.requestWillBeSent":
+            requests[key] = {**params, "frame_url": frames.get((session, params.get("frameId")), "")}
+        elif method == "Network.responseReceived":
+            responses[key] = params
+        elif method == "Network.loadingFinished":
+            finished[key] = params
+        elif method == "Network.loadingFailed":
+            request = requests.get(key, {})
+            url = request.get("request", {}).get("url", "")
+            start, end = request.get("timestamp"), params.get("timestamp")
+            frame_url = urllib.parse.urlsplit(request.get("frame_url", ""))
+            duplicate = (params.get("canceled") is True and params.get("errorText") == "net::ERR_ABORTED"
+                and params.get("type") == "Other" and re.fullmatch(r"https://tile\.openstreetmap\.org/\d+/\d+/\d+\.png", url)
+                and frame_url.hostname in ("127.0.0.1", "::1", "localhost")
+                and frame_url.path == "/component/streamlit_folium.st_folium/index.html"
+                and start is not None and end is not None and 0 <= end-start <= .25
+                and key not in responses)
+            delivered = []
+            if duplicate:
+                for prior_key, complete in finished.items():
+                    prior, response = requests.get(prior_key, {}), responses.get(prior_key, {}).get("response", {})
+                    if (prior_key != key and prior_key[0] == session and prior.get("frameId") == request.get("frameId")
+                        and prior.get("type") == "Image" and prior.get("request", {}).get("url") == url
+                        and response.get("status") == 200 and response.get("mimeType") == "image/png"
+                        and 0 <= start-complete.get("timestamp", float("inf")) <= .25):
+                        delivered.append(prior_key[1])
+            if delivered:
+                expected.append({"failure": event, "url": url, "delivered_request_ids": delivered,
+                                 "reason": "Already-loaded same-frame PNG; immediate duplicate Other request canceled"})
+            else:
+                unexpected.append(event)
+    return expected, unexpected
 
 
 class AcceptanceModel:
@@ -114,7 +166,11 @@ def run_acceptance_app():
             session = st.session_state.business_session
             data = {"session_id": session.session_id,
                     "datasets": [{"id": d.dataset_id, "name": d.name, "metadata": d.metadata,
-                                  "crs": d.crs, "frame": hasattr(d.data, "geometry")}
+                                  "crs": d.crs, "frame": hasattr(d.data, "geometry"),
+                                  "first_geometry": (d.data.geometry.iloc[0].__geo_interface__
+                                      if hasattr(d.data, "geometry") and len(d.data) else
+                                      d.data["features"][0]["geometry"]
+                                      if isinstance(d.data, dict) and d.data.get("features") else None)}
                                  for d in session.datasets.values()],
                     "layers": [asdict(x) for x in session.layers.values()],
                     "results": [asdict(x) for x in session.results],
@@ -194,6 +250,10 @@ def make_fixtures(out):
     write("multi.geojson", {"type":"FeatureCollection", "features":[feature({
         "type":"MultiPolygon", "coordinates":[[square(9,51)],[square(9.02,51)]]},5)]})
     write("numeric.csv", "lat,lon,value\n51,9,3\n")
+    write("utm_points.geojson", {"type": "FeatureCollection",
+          "crs": {"type": "name", "properties": {"name": "EPSG:25832"}},
+          "features": [feature({"type": "Point", "coordinates": [500000 + i*100, 5649824.888]}, i + 1)
+                       for i in range(3)]})
     write("bad.csv", "latitude,longitude\n51,9\n")
     write("bad.json", "{broken")
     return directory
@@ -291,8 +351,21 @@ def main():
     def chat(session, steps):
         nonce = uuid4().hex[:8]
         command = "ACCEPT "+json.dumps({"steps":steps,"nonce":nonce})
-        assert cdp.js(session,"(()=>{const e=document.querySelector('textarea[data-testid=stChatInputTextArea]');if(!e)return false;e.focus();return true})()")
+        stable_since = None
+        def ready():
+            nonlocal stable_since
+            idle = cdp.js(session,"""(()=>{const app=document.querySelector('[data-testid=stApp]');
+              const e=document.querySelector('textarea[data-testid=stChatInputTextArea]');
+              return !!e&&!e.disabled&&app?.getAttribute('data-test-script-state')==='notRunning'})()""")
+            if not idle:
+                stable_since = None
+                return False
+            stable_since = stable_since or time.monotonic()
+            return time.monotonic()-stable_since >= 1
+        wait_for(ready)
+        assert cdp.js(session,"(()=>{const e=document.querySelector('textarea[data-testid=stChatInputTextArea]');if(!e||e.disabled)return false;e.focus();return document.activeElement===e})()")
         cdp.call("Input.insertText",{"text":command},session)
+        assert cdp.js(session,"document.querySelector('textarea[data-testid=stChatInputTextArea]').value")==command
         for kind in ["keyDown","keyUp"]:
             cdp.call("Input.dispatchKeyEvent",{"type":kind,"key":"Enter","code":"Enter",
                      "windowsVirtualKeyCode":13},session)
@@ -515,12 +588,13 @@ def main():
         (out/"browser-events.json").write_text(json.dumps(errors,ensure_ascii=False,indent=2),encoding="utf-8")
         exceptions=[e for e in errors if e.get("method")=="Runtime.exceptionThrown"]
         console_errors=[e for e in errors if e.get("method")=="Log.entryAdded" and e["params"]["entry"].get("level")=="error"]
-        network_failures=[e for e in errors if e.get("method")=="Network.loadingFailed"]
+        expected_cancellations, network_failures=classify_network_failures(cdp.events)
         warning_counts=Counter((e["params"]["entry"].get("source"),e["params"]["entry"]["text"])
             for e in errors if e.get("method")=="Log.entryAdded" and e["params"]["entry"].get("level")=="warning")
         (out/"browser-diagnostics.json").write_text(json.dumps({
             "runtime_exceptions":len(exceptions),"console_errors":len(console_errors),
             "network_failures":len(network_failures),
+            "expected_duplicate_tile_cancellations":expected_cancellations,
             "warnings":[{"source":source,"text":text,"count":count} for (source,text),count in warning_counts.items()]
         },ensure_ascii=False,indent=2),encoding="utf-8")
         record("BROWSER-EXCEPTIONS","Failed" if exceptions or console_errors or network_failures else "Passed",

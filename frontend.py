@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from agent.graph import create_agent_session
 from agent.llm import smart_analyze_geodata, serialize_metadata_sample
 from core.session import SessionData
-from gis.data_io import parse_uploaded_file
+from gis.data_io import parse_uploaded_file, resolve_source_crs, prepare_map_layers
 from maps.renderer import (
     create_layered_map,
     Titel_hinzufügen,
@@ -86,19 +86,19 @@ with st.sidebar:
     # 3. 地图快速导出 (HTML)
     st.markdown("### 💾 Export")
     if st.button("Karte als HTML exportieren"):
-        m_export = create_layered_map(
-            st.session_state.business_session.map_view,
-            show_basemap=st.session_state.show_basemap
-        )
-        if st.session_state.Karte_Titel:
-            Titel_hinzufügen(m_export, st.session_state.Karte_Titel)
-
-        st.download_button(
-            "📥 HTML-Datei herunterladen",
-            render_map_html(m_export),
-            file_name="geogpt_map.html",
-            mime="text/html"
-        )
+        try:
+            m_export = create_layered_map(
+                prepare_map_layers(st.session_state.business_session.map_view),
+                show_basemap=st.session_state.show_basemap
+            )
+            if st.session_state.Karte_Titel:
+                Titel_hinzufügen(m_export, st.session_state.Karte_Titel)
+            st.download_button(
+                "📥 HTML-Datei herunterladen", render_map_html(m_export),
+                file_name="geogpt_map.html", mime="text/html"
+            )
+        except ValueError as exc:
+            st.error(f"CRS/Kartenexport: {exc}")
 
     st.markdown("---")
 
@@ -144,6 +144,7 @@ with col1:
                         # 1. 结构解析
                         parsed_data = parse_uploaded_file(uploaded_file)
                         raw_data = parsed_data["data"]
+                        source_crs = resolve_source_crs(raw_data)
 
                         # 2. 采样切片供 LLM 进行特征盲审
                         sample_str = serialize_metadata_sample(raw_data)
@@ -158,7 +159,7 @@ with col1:
                         # 4. 存入原始数据池
                         st.session_state.business_session.add_upload(
                             recommended_name, raw_data, file_id=file_id,
-                            renderer=detected_type, data_fields=detected_fields
+                            renderer=detected_type, data_fields=detected_fields, crs=source_crs
                         )
                         st.session_state.processed_files.add(file_id)
 
@@ -185,10 +186,14 @@ with col2:
     st.subheader("🗺️ Interaktive Karte")
 
     # 动态构建地图并注入标题
-    m = create_layered_map(
-        st.session_state.business_session.map_view,
-        show_basemap=st.session_state.show_basemap
-    )
+    try:
+        m = create_layered_map(
+            prepare_map_layers(st.session_state.business_session.map_view),
+            show_basemap=st.session_state.show_basemap
+        )
+    except ValueError as exc:
+        st.error(f"CRS/Karte: {exc}")
+        m = create_layered_map([], show_basemap=st.session_state.show_basemap)
     if st.session_state.Karte_Titel:
         Titel_hinzufügen(m, st.session_state.Karte_Titel)
 

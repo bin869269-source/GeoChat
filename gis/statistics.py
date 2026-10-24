@@ -8,6 +8,8 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 
+from .data_io import transform_geodata
+
 
 def calculate_area(polygons: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Return a copy with area_km2, using EPSG:25832 and four decimal places.
@@ -16,7 +18,7 @@ def calculate_area(polygons: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     zero; rejecting invalid geometries and improving precision are later work.
     """
     result = polygons.copy()
-    projected = polygons.to_crs(epsg=25832)
+    projected = transform_geodata(polygons, 25832)
     result["area_km2"] = (projected.geometry.area / 1_000_000).round(4)
     return result
 
@@ -27,8 +29,8 @@ def count_points_in_polygons(polygons: gpd.GeoDataFrame, points: gpd.GeoDataFram
     Join uses EPSG:3857 and strict within: boundary points excluded; a point in
     overlapping polygons counts in each. Retain the legacy index_right logic.
     """
-    projected_polygons = polygons.to_crs(epsg=3857)
-    projected_points = points.to_crs(epsg=3857)
+    projected_polygons = transform_geodata(polygons, 3857)
+    projected_points = transform_geodata(points, 3857)
     joined = gpd.sjoin(projected_points, projected_polygons, predicate="within", how="inner")
     counts = joined.groupby("index_right").size()
     values = polygons.index.map(counts).fillna(0).astype(int)

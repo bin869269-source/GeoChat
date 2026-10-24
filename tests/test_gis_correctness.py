@@ -47,7 +47,6 @@ def test_crs_assignment_and_real_transform():
     assert roundtrip.y == pytest.approx(51, abs=1e-9)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="KD-CRS: incoming CRS is overwritten with EPSG:4326")
 def test_declared_projected_crs_must_be_transformed():
     data = collection(Point(500000, 5649824.888))
     data["crs"] = {"type": "name", "properties": {"name": "EPSG:25832"}}

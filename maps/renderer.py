@@ -11,6 +11,28 @@ import folium
 import branca.colormap as cm
 from folium.plugins import HeatMap
 from branca.element import Element
+from pyproj import CRS
+
+
+def _check_wire_crs(layer):
+    """Require WGS84 wire data; callers prepare copies outside the renderer."""
+    declarations = []
+    if "crs" in layer:
+        declarations.append(layer["crs"])
+    data = layer.get("data")
+    if isinstance(data, dict) and "crs" in data:
+        header = data["crs"]
+        if not isinstance(header, dict) or header.get("type") != "name":
+            raise ValueError("Karten-CRS unbekannt; WGS84-Eingabe vorbereiten.")
+        properties = header.get("properties")
+        declarations.append(properties.get("name") if isinstance(properties, dict) else None)
+    for value in declarations:
+        try:
+            valid = value is not None and CRS.from_user_input(value).equals(CRS.from_epsg(4326), ignore_axis_order=True)
+        except Exception:
+            valid = False
+        if not valid:
+            raise ValueError("Karten benötigen eine tatsächlich nach EPSG:4326 transformierte Kopie.")
 
 DEFAULT_MAP_STYLE = {
     "color": "blue",
@@ -30,6 +52,7 @@ def create_layered_map(layers: List[dict], view_updates: Optional[dict] = None, 
 
     latest_bounds = None
     for layer in layers:
+        _check_wire_crs(layer)
         l_type = layer.get("type", "geojson")
         l_data = layer.get("data")
         l_name = layer.get("name", "Layer")
