@@ -8,6 +8,7 @@ from typing import List, Optional
 import requests
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from langchain_core.tools import tool, StructuredTool
 
@@ -106,7 +107,9 @@ def create_tools(session: SessionData):
         """
         Bringt einen bereits hochgeladenen Rohdaten-Layer auf die Karte oder ändert dessen Darstellungsart.
         map_type unterstützt: 'points', 'geojson', 'heatmap', 'choropleth'.
-        data_field: Numerisches Feld für thematische Karten (z.B. für choropleth oder heatmap).
+        data_field: Vorhandenes numerisches Attribut für Choropleth/Heatmap. Für Choropleth niemals ein Feld aus
+        dem Layernamen ableiten. Ohne Angabe wird nur bei genau einem numerischen Attribut automatisch gewählt;
+        bei mehreren muss der Nutzer wählen oder die Auswahl ausdrücklich dem Agenten überlassen.
         """
         raw_layers, show_layers = get_agent_layers()
         all_available = show_layers + raw_layers
@@ -115,7 +118,56 @@ def create_tools(session: SessionData):
             available_names = [l["name"] for l in all_available]
             return f"Layer '{layer_name}' nicht gefunden. Verfügbar sind: {available_names}"
 
-        input_frame(target)  # Unknown/conflicting CRS must not become a successful layer.
+        frame = input_frame(target)  # Unknown/conflicting CRS must not become a successful layer.
+
+        if map_type == "choropleth":
+            property_fields = [name for name in frame.columns if name != frame.geometry.name]
+            numeric_values = {}
+            for field in property_fields:
+                try:
+                    converted = pd.to_numeric(frame[field], errors="coerce")
+                    values = converted.to_numpy(dtype=float, na_value=np.nan)
+                    values = values[np.isfinite(values)]
+                except (TypeError, ValueError):
+                    continue
+                if len(values):
+                    numeric_values[field] = values
+
+            available = list(numeric_values)
+            requested_field = data_field
+            if requested_field:
+                if requested_field in property_fields:
+                    selected_field = requested_field
+                else:
+                    matches = [name for name in property_fields
+                               if name.casefold() == requested_field.casefold()]
+                    if len(matches) == 1:
+                        selected_field = matches[0]
+                    elif len(matches) > 1:
+                        return (f"Attribut '{requested_field}' ist wegen unterschiedlicher Schreibweisen mehrdeutig. "
+                                f"Bitte eines dieser Attribute exakt angeben: {', '.join(matches)}.")
+                    else:
+                        choices = ", ".join(available) if available else "Keine"
+                        return (f"Attribut '{requested_field}' nicht gefunden. Verfügbare numerische Attribute: "
+                                f"{choices}.")
+                if selected_field not in numeric_values:
+                    choices = ", ".join(available) if available else "Keine"
+                    return (f"Attribut '{selected_field}' ist nicht numerisch oder enthält keine gültigen Zahlen. "
+                            f"Verfügbare numerische Attribute: {choices}.")
+            elif len(available) == 1:
+                selected_field = available[0]
+            elif len(available) > 1:
+                return ("Für die Choropleth-Karte gibt es mehrere numerische Attribute. "
+                        f"Bitte eines auswählen: {', '.join(available)}.")
+            else:
+                return "Für diese Daten wurden keine numerischen Attribute gefunden; eine Choropleth-Karte ist nicht möglich."
+
+            values = numeric_values[selected_field]
+            if len(values) > 1 and np.unique(values).size == 1:
+                return (f"Attribut '{selected_field}' enthält überall denselben Wert; "
+                        "damit lässt sich keine sinnvolle Farbskala bilden. Bitte ein anderes Attribut wählen.")
+            missing_count = len(frame) - len(values)
+            data_field = selected_field
 
         folium_kwargs = {
             "color": color,
@@ -136,6 +188,14 @@ def create_tools(session: SessionData):
             "folium_kwargs": folium_kwargs,
             "style": folium_kwargs
         })
+        if map_type == "choropleth":
+            tool_metrics["choropleth_field"] = data_field
+            if missing_count:
+                return (f"Erfolg: Layer '{target['name']}' wurde als Choropleth unter dem Namen "
+                        f"'{new_map_layer_name}' mit Attribut '{data_field}' erstellt. "
+                        f"{missing_count} von {len(frame)} Objekten haben keinen gültigen Wert und werden als fehlend markiert.")
+            return (f"Erfolg: Layer '{target['name']}' wurde als Choropleth unter dem Namen "
+                    f"'{new_map_layer_name}' mit Attribut '{data_field}' erstellt.")
         return f"Erfolg: Layer '{target['name']}' wurde als '{map_type}' unter dem Namen '{new_map_layer_name}' zur Karte hinzugefügt."
 
     @tool

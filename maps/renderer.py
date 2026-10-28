@@ -5,6 +5,7 @@ GeoJSON is copied at the Folium boundary to avoid its identifier injection
 mutating caller data. Helpers intentionally add children to the supplied map.
 """
 from copy import deepcopy
+import math
 from typing import List, Optional
 
 import folium
@@ -133,15 +134,58 @@ def add_choropleth_layer(m, geojson_data, layer_name, data_field=None, folium_kw
         "Greens": cm.linear.Greens_09,
         "Purples": cm.linear.Purples_09
     }
-    features = geojson_data.get("features", []) if isinstance(geojson_data, dict) else []
+    # GeoJSON uploads may be either a FeatureCollection or one Feature. Keep
+    # both forms intact for Folium, but inspect their properties consistently
+    # when deriving the color scale.
+    if isinstance(geojson_data, dict):
+        if geojson_data.get("type") == "Feature":
+            features = [geojson_data]
+        elif geojson_data.get("type") == "FeatureCollection":
+            features = geojson_data.get("features", [])
+        else:
+            features = []
+    elif isinstance(geojson_data, list):
+        features = geojson_data
+    else:
+        features = []
+    if not isinstance(features, list):
+        features = []
+
+    property_fields = list(dict.fromkeys(
+        key
+        for feat in features if isinstance(feat, dict)
+        for key in (feat.get("properties") or {})
+    ))
+    if data_field not in property_fields:
+        matches = [field for field in property_fields
+                   if data_field and field.casefold() == data_field.casefold()]
+        if len(matches) == 1:
+            data_field = matches[0]
+        else:
+            available = ", ".join(property_fields) if property_fields else "Keine"
+            raise ValueError(f"Choropleth-Attribut '{data_field}' nicht gefunden. Verfügbare Attribute: {available}.")
+
     values = []
     for feat in features:
-        val = feat.get("properties", {}).get(data_field)
+        properties = feat.get("properties") or {}
+        val = properties.get(data_field)
         if val is not None:
-            try: values.append(float(val))
+            try:
+                numeric_value = float(val)
+                if math.isfinite(numeric_value):
+                    values.append(numeric_value)
             except: pass
+    if not values:
+        raise ValueError(f"Choropleth-Attribut '{data_field}' enthält keine gültigen numerischen Werte.")
+    if len(values) > 1 and min(values) == max(values):
+        raise ValueError(f"Choropleth-Attribut '{data_field}' enthält überall denselben Wert; keine Farbskala möglich.")
+    name_candidates = ("name", "stadtteilname", "stadtteil", "gemeindename", "ort", "bezeichnung")
+    name_field = next((field for candidate in name_candidates for field in property_fields
+                       if field.casefold() == candidate), None)
+    tooltip_fields = ([name_field] if name_field and name_field != data_field else []) + [data_field]
+    tooltip_aliases = [f"{field}:" if field == data_field else "Name:" for field in tooltip_fields]
 
-    min_val, max_val = (min(values), max(values)) if values else (0, 1)
+    min_val, max_val = min(values), max(values)
     if min_val == max_val: max_val += 1
 
     scale_gen = COLORMAPS.get(folium_kwargs.get("fillColor", "YlOrRd"), cm.linear.YlOrRd_09)
@@ -161,6 +205,13 @@ def add_choropleth_layer(m, geojson_data, layer_name, data_field=None, folium_kw
 
     fg = folium.FeatureGroup(name=layer_name)
     geo_l = folium.GeoJson(deepcopy(geojson_data), name=layer_name, style_function=style_fn).add_to(fg)
+    if tooltip_fields:
+        geo_l.add_child(folium.GeoJsonTooltip(
+            fields=tooltip_fields,
+            aliases=tooltip_aliases,
+            localize=True,
+            sticky=True,
+        ))
     fg.add_to(m)
     colormap.add_to(m)
     try: return geo_l.get_bounds()

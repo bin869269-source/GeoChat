@@ -4,7 +4,7 @@
 # ==============================================================================
 import streamlit as st
 from streamlit_folium import st_folium
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from agent.graph import create_agent_session
 from agent.llm import smart_analyze_geodata, serialize_metadata_sample
@@ -15,6 +15,54 @@ from maps.renderer import (
     Titel_hinzufügen,
     render_map_html
 )
+
+
+def _message_text(content):
+    """Extract readable text from plain or block-style LangChain content."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return "\n".join(part for part in parts if part.strip()).strip()
+    return str(content).strip() if content is not None else ""
+
+
+def _render_chat_history(placeholder):
+    with placeholder.container():
+        if not st.session_state.messages:
+            st.chat_message("assistant").write(
+                "Hallo! Ich bin dein autonomer GIS-Agent. Du kannst Daten hochladen oder mich bitten, "
+                "z.B. **'Zeige die Stadtgrenze von Dresden'**, **'Berechne einen 1000m Puffer'** oder "
+                "**'Führe eine räumliche Dichteanalyse durch'**."
+            )
+        for msg in st.session_state.messages:
+            st.chat_message(msg["role"]).write(msg["content"])
+
+
+def _render_map(placeholder):
+    with placeholder.container():
+        try:
+            m = create_layered_map(
+                prepare_map_layers(st.session_state.business_session.map_view),
+                show_basemap=st.session_state.show_basemap
+            )
+        except ValueError as exc:
+            st.error(f"CRS/Karte: {exc}")
+            m = create_layered_map([], show_basemap=st.session_state.show_basemap)
+        if st.session_state.Karte_Titel:
+            Titel_hinzufügen(m, st.session_state.Karte_Titel)
+
+        st_folium(
+            m,
+            width="100%",
+            height=620,
+            key=f"map_instance_{st.session_state.map_key}"
+        )
 
 # 页面基础配置
 st.set_page_config(layout="wide", page_title="GeoGPT Autonomous GIS Agent")
@@ -172,38 +220,12 @@ with col1:
     # 对话消息容器
     chat_container = st.container(height=420)
     with chat_container:
-        if not st.session_state.messages:
-            st.chat_message("assistant").write(
-                "Hallo! Ich bin dein autonomer GIS-Agent. Du kannst Daten hochladen oder mich bitten, "
-                "z.B. **'Zeige die Stadtgrenze von Dresden'**, **'Berechne einen 1000m Puffer'** oder "
-                "**'Führe eine räumliche Dichteanalyse durch'**."
-            )
-        for msg in st.session_state.messages:
-            st.chat_message(msg["role"]).write(msg["content"])
+        chat_history_placeholder = st.empty()
 
 # ======= 右侧：交互式 Folium 地图 =======
 with col2:
     st.subheader("🗺️ Interaktive Karte")
-
-    # 动态构建地图并注入标题
-    try:
-        m = create_layered_map(
-            prepare_map_layers(st.session_state.business_session.map_view),
-            show_basemap=st.session_state.show_basemap
-        )
-    except ValueError as exc:
-        st.error(f"CRS/Karte: {exc}")
-        m = create_layered_map([], show_basemap=st.session_state.show_basemap)
-    if st.session_state.Karte_Titel:
-        Titel_hinzufügen(m, st.session_state.Karte_Titel)
-
-    # 渲染地图组件
-    st_folium(
-        m,
-        width="100%",
-        height=620,
-        key=f"map_instance_{st.session_state.map_key}"
-    )
+    map_placeholder = st.empty()
 
 # ==========================================
 # BLOCK 4: AGENT EXECUTION GATEWAY (ReAct LOOP)
@@ -219,16 +241,51 @@ if user_query:
     with st.spinner("🤖 GeoGPT überlegt und führt Werkzeuge aus..."):
         try:
             # Agent 工具已绑定当前会话；每个工具验证后原子提交，后续步骤可读取结果。
+            map_layer_count_before = len(st.session_state.business_session.map_view)
             graph_input = {
                 "messages": st.session_state.agent_msg_history
             }
             final_state = st.session_state.session_agent.agent_app.invoke(graph_input)
 
-            # 4. 同步消息历史与输出
-            final_ai_msg = final_state["messages"][-1]
-            st.session_state.agent_msg_history.append(final_ai_msg)
+            # Use the final non-tool-call assistant message when available.
+            final_ai_msg = next((message for message in reversed(final_state.get("messages", []))
+                                 if isinstance(message, AIMessage) and not message.tool_calls), None)
+            output_text = _message_text(final_ai_msg.content) if final_ai_msg else ""
+            if not output_text:
+                tool_reports = [_message_text(message.content)
+                                for message in final_state.get("messages", [])
+                                if isinstance(message, ToolMessage) and _message_text(message.content)]
+                if tool_reports:
+                    output_text = ("操作已处理，但 Agent 没有生成总结。工具返回结果：\n\n"
+                                   + tool_reports[-1])
+                else:
+                    output_text = "Agent 没有返回可显示的文字，请重试或换一种方式描述请求。"
 
-            output_text = final_ai_msg.content
+            execution_messages = [message for message in final_state.get("messages", [])
+                                  if isinstance(message, ToolMessage)]
+            visualization_results = [message for message in execution_messages
+                                     if message.name == "visualize_layer_on_map"]
+            visualization_calls = [call
+                                   for message in final_state.get("messages", [])
+                                   if isinstance(message, AIMessage)
+                                   for call in (message.tool_calls or [])
+                                   if call.get("name") == "visualize_layer_on_map"]
+            if visualization_results:
+                actual_result = _message_text(visualization_results[-1].content)
+                if not actual_result.startswith("Erfolg:"):
+                    output_text = actual_result or "地图工具执行失败，但没有返回错误详情。"
+                elif len(st.session_state.business_session.map_view) <= map_layer_count_before:
+                    output_text = ("地图工具报告了成功，但当前会话没有新增地图图层。"
+                                   "请检查是否运行了另一个应用实例，或查看 Streamlit 后台错误。")
+            elif visualization_calls:
+                output_text = ("Agent 请求了创建地图，但工作流没有返回地图工具的执行结果。"
+                               "请查看 Streamlit 后台日志后重试。")
+
+            # Never carry an empty assistant response into the next request.
+            st.session_state.agent_msg_history.append(
+                final_ai_msg if final_ai_msg and _message_text(final_ai_msg.content) == output_text
+                else AIMessage(content=output_text)
+            )
             st.session_state.messages.append({"role": "assistant", "content": output_text})
 
             # 5. 触发地图物理刷新
@@ -237,5 +294,10 @@ if user_query:
         except Exception as e:
             error_feedback = f"⚠️ Fehler bei der Ausführung des Agenten: {str(e)}"
             st.session_state.messages.append({"role": "assistant", "content": error_feedback})
+            st.session_state.agent_msg_history.append(AIMessage(content=error_feedback))
 
-    st.rerun()
+
+# Render both stateful areas after handling this run's user input so the first
+# response and map update do not depend on a follow-up widget or map event.
+_render_chat_history(chat_history_placeholder)
+_render_map(map_placeholder)

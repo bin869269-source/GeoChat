@@ -1,5 +1,6 @@
 """Single-agent ReAct workflow with explicit model, tools and layer access."""
 from functools import partial
+import math
 from threading import RLock
 from typing import TypedDict, Sequence, Annotated, Optional, List
 
@@ -12,6 +13,55 @@ from langgraph.prebuilt import ToolNode
 from core.session import SessionData
 from .llm import create_llm
 
+
+def _layer_attribute_summary(layer: dict) -> str:
+    """Describe real property names and sampled value types for the agent."""
+    data = layer.get("data")
+    if isinstance(data, dict):
+        if data.get("type") == "Feature":
+            features = [data]
+        else:
+            features = data.get("features", [])
+    elif isinstance(data, list):
+        features = data
+    else:
+        features = []
+    if not isinstance(features, list):
+        features = []
+
+    samples = {}
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        properties = feature.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        for name, value in properties.items():
+            field_samples = samples.setdefault(name, [])
+            if len(field_samples) < 50:
+                field_samples.append(value)
+
+    summaries = []
+    for name, values in samples.items():
+        present = [value for value in values if value is not None]
+        numeric = bool(present)
+        saw_finite_number = False
+        for value in present:
+            if isinstance(value, bool):
+                numeric = False
+                break
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                numeric = False
+                break
+            if not math.isfinite(number):
+                continue
+            saw_finite_number = True
+        numeric = numeric and saw_finite_number
+        summaries.append(f"{name} ({'numerisch' if numeric else 'text/other'})")
+    return ", ".join(summaries) if summaries else "Keine Attribute erkannt"
+
 class AgentState(TypedDict):
     """LangGraph 状态定义：自动利用 add_messages 维护 ReAct 循环中 Message 的历史状态"""
     messages: Annotated[Sequence[BaseMessage], add_messages]
@@ -21,9 +71,9 @@ class AgentState(TypedDict):
 def agent_reasoner(state: AgentState, *, llm_with_tools, get_layers) -> dict:
     """Reason 阶段：由 LLM 结合长上下文自主决定直接回答或调用工具"""
     raw_layers, show_layers = get_layers()
-    raw_summary = [f"'{l['name']}' ({l['type']})" + (
+    raw_summary = [f"'{l['name']}' ({l['type']}; Attribute: {_layer_attribute_summary(l)})" + (
         f" [Dataset-ID: {l['dataset_id']}]" if l.get("dataset_id") else "") for l in raw_layers]
-    show_summary = [f"'{l['name']}' ({l['type']})" + (
+    show_summary = [f"'{l['name']}' ({l['type']}; Attribute: {_layer_attribute_summary(l)})" + (
         f" [Layer-ID: {l['layer_id']}, Dataset-ID: {l['dataset_id']}]" if l.get("layer_id") else "")
         for l in show_layers]
 
@@ -38,7 +88,10 @@ def agent_reasoner(state: AgentState, *, llm_with_tools, get_layers) -> dict:
     HANDLUNGSLEITFADEN:
     1. Du darfst und sollst Werkzeuge (Tools) verwenden, um Aktionen durchzuführen.
     2. Wenn ein Befehl mehrere Schritte erfordert (z.B. 'Lade Stadt Dresden und lege einen 1000m Puffer an'), führe die Werkzeuge nacheinander aus.
-    3. Gib dem Nutzer nach Beendigung aller Tool-Aufrufe eine prägnante, informative Zusammenfassung auf Deutsch.
+    3. Bei Choropleth-Karten darfst du nur ein tatsächlich aufgeführtes, numerisches Attribut verwenden; erfinde niemals einen Feldnamen aus dem Layer- oder Dateinamen.
+    4. Wurde kein Choropleth-Attribut genannt und gibt es genau ein numerisches Attribut, verwende es und nenne es in der Antwort. Gibt es mehrere, frage nach einer Auswahl, außer der Nutzer hat die Auswahl ausdrücklich dir überlassen; dann wähle ein passendes Attribut und nenne es.
+    5. Bei einem nicht verfügbaren oder nicht numerischen Attribut erkläre den Fehler und nenne die verfügbaren numerischen Attribute. Behaupte nur dann, eine Karte erstellt zu haben, wenn das Werkzeug erfolgreich war.
+    6. Gib dem Nutzer nach Beendigung aller Tool-Aufrufe eine prägnante, informative Zusammenfassung auf Deutsch.
     """
 
     # 过滤掉系统消息，在首位统一拼装最新的系统认知

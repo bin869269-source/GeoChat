@@ -149,10 +149,46 @@ def test_choropleth_palette_and_missing_value():
     m = renderer.create_layered_map([entry])
     group = next(c for c in m._children.values() if isinstance(c, folium.FeatureGroup))
     geojson = next(c for c in group._children.values() if isinstance(c, folium.GeoJson))
+    tooltip = next(c for c in geojson._children.values() if isinstance(c, folium.GeoJsonTooltip))
+    assert tooltip.fields == ["name", "value"]
+    assert tooltip.aliases == ["Name:", "value:"]
     assert geojson.style_function(first)["fillColor"].startswith("#f7fbff")
     assert geojson.style_function(second)["fillColor"].startswith("#08306b")
     assert geojson.style_function(third)["fillColor"] == "#cccccc"
-    assert "test_choropleth - value" in renderer.render_map_html(m).decode("utf-8")
+    html = renderer.render_map_html(m).decode("utf-8")
+    assert "test_choropleth - value" in html
+    assert "bindTooltip" in html and '"value"' in html
+
+
+@pytest.mark.parametrize("field,match", [("missing", "nicht gefunden"),
+                                          ("name", "keine gültigen numerischen Werte")])
+def test_choropleth_rejects_unusable_field(field, match):
+    entry = configured_layer("choropleth")
+    entry["data_field"] = field
+    with pytest.raises(ValueError, match=match):
+        renderer.create_layered_map([entry])
+
+
+def test_choropleth_matches_field_name_case_insensitively():
+    entry = configured_layer("choropleth")
+    entry["data_field"] = "VALUE"
+    m = renderer.create_layered_map([entry])
+    group = next(c for c in m._children.values() if isinstance(c, folium.FeatureGroup))
+    geojson = next(c for c in group._children.values() if isinstance(c, folium.GeoJson))
+    assert geojson.style_function(entry["data"]["features"][0])["fillColor"] != "#cccccc"
+
+
+def test_choropleth_tooltip_uses_only_name_and_mapped_value():
+    entry = configured_layer("choropleth")
+    for feature in entry["data"]["features"]:
+        feature["properties"].pop("name")
+        feature["properties"]["stadtteilname"] = "Altstadt"
+    m = renderer.create_layered_map([entry])
+    group = next(c for c in m._children.values() if isinstance(c, folium.FeatureGroup))
+    geojson = next(c for c in group._children.values() if isinstance(c, folium.GeoJson))
+    tooltip = next(c for c in geojson._children.values() if isinstance(c, folium.GeoJsonTooltip))
+    assert tooltip.fields == ["stadtteilname", "value"]
+    assert tooltip.aliases == ["Name:", "value:"]
 
 
 def test_latest_layer_bounds_and_explicit_override():

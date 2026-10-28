@@ -86,6 +86,57 @@ def test_visualize(session_agent, bind, points, kind):
     assert shown[0]["data_field"] == "value"
 
 
+def test_choropleth_auto_selects_single_numeric_field(session_agent, bind, points):
+    _, shown = bind(points)
+    output = session_agent.visualize_layer_on_map.invoke({
+        "layer_name": "points", "map_type": "choropleth"})
+    assert "Erfolg" in output and "Attribut 'value'" in output
+    assert shown[0]["data_field"] == "value"
+
+
+def test_choropleth_requires_choice_when_multiple_numeric_fields(session_agent, bind, points):
+    source = copy.deepcopy(points)
+    for index, feature in enumerate(source["data"]["features"], 1):
+        feature["properties"]["count"] = index * 10
+    _, shown = bind(source)
+    output = session_agent.visualize_layer_on_map.invoke({
+        "layer_name": "points", "map_type": "choropleth"})
+    assert "Mehrere numerische Attribute" in output
+    assert "value" in output and "count" in output and shown == []
+
+
+@pytest.mark.parametrize("field,expected", [("VALUE", "Attribut 'value'"),
+                                             ("missing", "nicht gefunden"),
+                                             ("name", "nicht numerisch")])
+def test_choropleth_validates_requested_field(session_agent, bind, points, field, expected):
+    _, shown = bind(points)
+    output = session_agent.visualize_layer_on_map.invoke({
+        "layer_name": "points", "map_type": "choropleth", "data_field": field})
+    if field == "VALUE":
+        assert "Erfolg" in output and expected in output
+        assert shown[0]["data_field"] == "value"
+    else:
+        assert expected in output and shown == []
+
+
+def test_choropleth_rejects_no_numeric_or_constant_fields(session_agent, bind, points):
+    no_numeric = copy.deepcopy(points)
+    for feature in no_numeric["data"]["features"]:
+        feature["properties"].pop("value")
+    bind(no_numeric)
+    output = session_agent.visualize_layer_on_map.invoke({
+        "layer_name": "points", "map_type": "choropleth"})
+    assert "keine numerischen Attribute" in output
+
+    constant = copy.deepcopy(points)
+    for feature in constant["data"]["features"]:
+        feature["properties"]["value"] = 5
+    _, shown = bind(constant)
+    output = session_agent.visualize_layer_on_map.invoke({
+        "layer_name": "points", "map_type": "choropleth", "data_field": "value"})
+    assert "denselben Wert" in output and shown == []
+
+
 @pytest.mark.parametrize("name,args", [
     ("visualize_layer_on_map", {"layer_name": "absent"}),
     ("calculate_buffer_analysis", {"layer_name": "absent"}),

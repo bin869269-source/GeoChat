@@ -250,6 +250,8 @@ def test_prompt_reads_current_layers_and_preserves_tool_messages(points, polygon
     assert seen[0][1:] == messages[1:]
     prompt = seen[0][0].content
     assert "obsolete" not in prompt and "'points' (points)" in prompt and "'polygons' (geojson)" in prompt
+    assert "value (numerisch)" in prompt and "name (text/other)" in prompt
+    assert "erfinde niemals einen Feldnamen" in prompt
     assert "autonomer und professioneller GIS-Agent" in prompt and "führe die Werkzeuge nacheinander aus" in prompt
     tools.session.replace_from_legacy([], [])
     graph.agent_reasoner({"messages": messages}, llm_with_tools=model, get_layers=tools.get_agent_layers)
