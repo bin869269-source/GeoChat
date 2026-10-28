@@ -355,12 +355,12 @@ def create_tools(session: SessionData):
             return f"Layer '{layer_name}' wurde nicht gefunden. Verfügbar sind: {available}"
 
         try:
-            # 1. 转换为 GeoDataFrame
+            # 1. In einen GeoDataFrame umwandeln
             gdf = input_frame(target)
             if len(gdf) < 2:
                 return f"Der Layer '{layer_name}' enthält weniger als 2 Objekte. Abstandsberechnung nicht möglich."
 
-            # 尝试提取能代表建筑名称的字段
+            # Ein Attribut ermitteln, das den Gebäudenamen enthält
             name_cols = [c for c in ["bezeichnung", "name", "einrichtung", "strasse"] if c in gdf.columns]
             label_col = name_cols[0] if name_cols else None
 
@@ -376,10 +376,10 @@ def create_tools(session: SessionData):
                     "distance_m": pair["distance_m"]
                 })
 
-            # 按距离从近到远排序
+            # Nach Entfernung aufsteigend sortieren
             results.sort(key=lambda x: x["distance_m"])
 
-            # 3. 格式化输出 Markdown 表格
+            # 3. Als Markdown-Tabelle formatieren
             summary = f"### 📏 Distanzanalyse für '{target['name']}'\n\n"
             summary += f"Es wurden die Abstände zwischen insgesamt **{len(gdf)} Gebäuden/Objekten** berechnet.\n\n"
             summary += "| Von | Nach | Abstand (Meter) | Abstand (km) |\n"

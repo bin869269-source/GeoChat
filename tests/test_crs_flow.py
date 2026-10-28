@@ -243,12 +243,12 @@ def test_native_frame_nested_attributes_not_shared_after_conversion():
 
 def test_point_protocol_properties_and_projected_feature_attributes_survive():
     points = [{"lat": 51, "lon": 9, "crs": "ordinary attribute", "bbox": "attribute",
-               "properties": {"标签": [1]}}]
+               "properties": {"Beschriftung": [1]}}]
     layers = [{"name": "csv", "type": "points", "data": points}]
     result = prepare_map_layers(layers)
     assert result[0]["data"] == points
-    result[0]["data"][0]["properties"]["标签"].append(2)
-    assert points[0]["properties"]["标签"] == [1]
+    result[0]["data"][0]["properties"]["Beschriftung"].append(2)
+    assert points[0]["properties"]["Beschriftung"] == [1]
     source = legacy(Point(500000, 5650000))
     source["bbox"] = [500000, 5650000, 500000, 5650000]
     source["features"][0].update(id="stable-feature", bbox=source["bbox"])

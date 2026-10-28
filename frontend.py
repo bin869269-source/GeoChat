@@ -64,7 +64,7 @@ def _render_map(placeholder):
             key=f"map_instance_{st.session_state.map_key}"
         )
 
-# 页面基础配置
+# Seitengrundkonfiguration
 st.set_page_config(layout="wide", page_title="GeoGPT Autonomous GIS Agent")
 st.markdown("## 🌍 GeoGPT: Autonomer GIS Agent")
 
@@ -80,15 +80,15 @@ if "session_agent" not in st.session_state:
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = set()
 if "map_key" not in st.session_state:
-    st.session_state.map_key = 0            # 控制 Folium 物理强制重绘
+    st.session_state.map_key = 0            # Erzwingt die Neudarstellung der Folium-Karte
 if "upload_key" not in st.session_state:
-    st.session_state.upload_key = 0         # 重置时清除仍选中的上传文件
+    st.session_state.upload_key = 0         # Entfernt beim Zurücksetzen noch ausgewählte Uploads
 if "Karte_Titel" not in st.session_state:
     st.session_state.Karte_Titel = ""
 if "show_basemap" not in st.session_state:
     st.session_state.show_basemap = True
 if "agent_msg_history" not in st.session_state:
-    st.session_state.agent_msg_history = []  # LangChain 原生 Message 对象历史
+    st.session_state.agent_msg_history = []  # Verlauf aus nativen LangChain-Nachrichten
 
 # ==========================================
 # BLOCK 2: SIDEBAR CONTROL PANEL
@@ -97,7 +97,7 @@ with st.sidebar:
     st.markdown("### 🗺️ Kartenverwaltung")
     st.markdown("---")
 
-    # 1. 查看与删除上传的原始数据
+    # 1. Hochgeladene Rohdaten anzeigen und entfernen
     with st.expander("📁 Hochgeladene Rohdaten", expanded=True):
         if st.session_state.business_session.raw_view:
             for i, layer in enumerate(st.session_state.business_session.raw_view):
@@ -114,7 +114,7 @@ with st.sidebar:
         else:
             st.info("Noch keine Geodaten hochgeladen.")
 
-    # 2. 查看与删除地图已渲染的图层
+    # 2. Auf der Karte dargestellte Layer anzeigen und entfernen
     with st.expander("📍 Aktive Kartenlayer", expanded=True):
         if st.session_state.business_session.map_view:
             for i, layer in enumerate(st.session_state.business_session.map_view):
@@ -131,7 +131,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # 3. 地图快速导出 (HTML)
+    # 3. Karte als HTML exportieren
     st.markdown("### 💾 Export")
     if st.button("Karte als HTML exportieren"):
         try:
@@ -150,7 +150,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # 4. 底图开关与全局重置
+    # 4. Basiskarte umschalten und Sitzung zurücksetzen
     st.session_state.show_basemap = st.checkbox(
         "OpenStreetMap Basemap anzeigen",
         value=st.session_state.show_basemap
@@ -171,11 +171,11 @@ with st.sidebar:
 # ==========================================
 col1, col2 = st.columns([1, 1.4])
 
-# ======= 左侧：文件上传与对话窗口 =======
+# ======= Linke Spalte: Datei-Upload und Agent-Dialog =======
 with col1:
     st.subheader("💬 Daten & Agent-Dialog")
 
-    # 多文件上传支持
+    # Mehrere Dateien gleichzeitig hochladen
     uploaded_files = st.file_uploader(
         "Geodaten hochladen (GeoJSON, JSON, CSV):",
         type=["json", "csv", "geojson"],
@@ -189,22 +189,22 @@ with col1:
             if file_id not in st.session_state.processed_files:
                 with st.spinner(f"GeoGPT analysiert '{file_id}'..."):
                     try:
-                        # 1. 结构解析
+                        # 1. Datei einlesen und strukturieren
                         parsed_data = parse_uploaded_file(uploaded_file)
                         raw_data = parsed_data["data"]
                         source_crs = resolve_source_crs(raw_data)
 
-                        # 2. 采样切片供 LLM 进行特征盲审
+                        # 2. Stichprobe für die Attributanalyse durch das LLM erstellen
                         sample_str = serialize_metadata_sample(raw_data)
 
-                        # 3. 调用元数据提取专家分析
+                        # 3. Metadaten durch das LLM analysieren lassen
                         analysis = smart_analyze_geodata(
                             uploaded_file.name, sample_str, llm=st.session_state.session_agent.llm)
                         detected_type = analysis.get("detected_type", parsed_data["type"])
                         detected_fields = analysis.get("data_fields", [])
                         recommended_name = analysis.get("recommended_layer_name", uploaded_file.name)
 
-                        # 4. 存入原始数据池
+                        # 4. Rohdaten in der Sitzung speichern
                         st.session_state.business_session.add_upload(
                             recommended_name, raw_data, file_id=file_id,
                             renderer=detected_type, data_fields=detected_fields, crs=source_crs
@@ -217,12 +217,12 @@ with col1:
 
     st.markdown("---")
 
-    # 对话消息容器
+    # Container für den Chatverlauf
     chat_container = st.container(height=420)
     with chat_container:
         chat_history_placeholder = st.empty()
 
-# ======= 右侧：交互式 Folium 地图 =======
+# ======= Rechte Spalte: Interaktive Folium-Karte =======
 with col2:
     st.subheader("🗺️ Interaktive Karte")
     map_placeholder = st.empty()
@@ -233,14 +233,14 @@ with col2:
 user_query = st.chat_input("Was möchtest du analysieren oder auf der Karte darstellen?")
 
 if user_query:
-    # 1. 记录并渲染用户输入
+    # 1. Benutzereingabe speichern und anzeigen
     st.session_state.messages.append({"role": "user", "content": user_query})
     user_msg_obj = HumanMessage(content=user_query)
     st.session_state.agent_msg_history.append(user_msg_obj)
 
     with st.spinner("🤖 GeoGPT überlegt und führt Werkzeuge aus..."):
         try:
-            # Agent 工具已绑定当前会话；每个工具验证后原子提交，后续步骤可读取结果。
+            # Die Agent-Werkzeuge sind an diese Sitzung gebunden und veröffentlichen Ergebnisse atomar.
             map_layer_count_before = len(st.session_state.business_session.map_view)
             graph_input = {
                 "messages": st.session_state.agent_msg_history
@@ -256,10 +256,11 @@ if user_query:
                                 for message in final_state.get("messages", [])
                                 if isinstance(message, ToolMessage) and _message_text(message.content)]
                 if tool_reports:
-                    output_text = ("操作已处理，但 Agent 没有生成总结。工具返回结果：\n\n"
+                    output_text = ("Die Aktion wurde ausgeführt, aber der Agent hat keine Zusammenfassung erstellt. "
+                                   "Werkzeugergebnis:\n\n"
                                    + tool_reports[-1])
                 else:
-                    output_text = "Agent 没有返回可显示的文字，请重试或换一种方式描述请求。"
+                    output_text = "Der Agent hat keinen anzeigbaren Text zurückgegeben. Bitte versuche es erneut oder formuliere die Anfrage anders."
 
             execution_messages = [message for message in final_state.get("messages", [])
                                   if isinstance(message, ToolMessage)]
@@ -273,13 +274,13 @@ if user_query:
             if visualization_results:
                 actual_result = _message_text(visualization_results[-1].content)
                 if not actual_result.startswith("Erfolg:"):
-                    output_text = actual_result or "地图工具执行失败，但没有返回错误详情。"
+                    output_text = actual_result or "Das Kartenwerkzeug ist fehlgeschlagen, hat aber keine Fehlerdetails zurückgegeben."
                 elif len(st.session_state.business_session.map_view) <= map_layer_count_before:
-                    output_text = ("地图工具报告了成功，但当前会话没有新增地图图层。"
-                                   "请检查是否运行了另一个应用实例，或查看 Streamlit 后台错误。")
+                    output_text = ("Das Kartenwerkzeug meldet Erfolg, aber in dieser Sitzung wurde kein neuer Kartenlayer angelegt. "
+                                   "Prüfe, ob eine andere Anwendungsinstanz läuft, oder sieh im Streamlit-Terminal nach Fehlern.")
             elif visualization_calls:
-                output_text = ("Agent 请求了创建地图，但工作流没有返回地图工具的执行结果。"
-                               "请查看 Streamlit 后台日志后重试。")
+                output_text = ("Der Agent hat die Kartenerstellung angefordert, aber der Workflow hat kein Ergebnis des Kartenwerkzeugs zurückgegeben. "
+                               "Sieh im Streamlit-Terminal nach und versuche es erneut.")
 
             # Never carry an empty assistant response into the next request.
             st.session_state.agent_msg_history.append(
@@ -288,7 +289,7 @@ if user_query:
             )
             st.session_state.messages.append({"role": "assistant", "content": output_text})
 
-            # 5. 触发地图物理刷新
+            # 5. Kartenkomponente neu aufbauen
             st.session_state.map_key += 1
 
         except Exception as e:

@@ -216,7 +216,7 @@ def test_empty_map_and_empty_layer_keep_original_view_rules():
 @pytest.mark.parametrize("kind", ["points", "line", "polygon", "multipolygon", "heatmap", "choropleth"])
 def test_memory_html_matches_folium_save_bytes(kind, tmp_path):
     m = renderer.create_layered_map([configured_layer(kind)])
-    renderer.Titel_hinzufügen(m, "地图 · Dresden")
+    renderer.Titel_hinzufügen(m, "Karte · Dresden")
     # Folium render populates generated children; compare the first render of
     # identical map states, retaining IDs, rather than rendering one map thrice.
     buffer_map, disk_map = copy.deepcopy(m), copy.deepcopy(m)
@@ -226,7 +226,7 @@ def test_memory_html_matches_folium_save_bytes(kind, tmp_path):
     path = tmp_path / "reference.html"
     disk_map.save(str(path))
     assert payload == buffer.getvalue() == path.read_bytes()
-    assert "地图 · Dresden" in payload.decode("utf-8")
+    assert "Karte · Dresden" in payload.decode("utf-8")
 
 
 def test_separate_maps_export_separate_bytes():

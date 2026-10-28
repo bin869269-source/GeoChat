@@ -52,12 +52,12 @@ def test_missing_and_nonfinite_are_null_only_in_preview(value):
 
 
 def test_nested_fields_names_unicode_and_containers_are_unchanged():
-    data = [{"name": "点 Ä", "properties": {"字段": np.int64(7), "nested": [np.float32(.25),
+    data = [{"name": "Punkt Ä", "properties": {"Attribut": np.int64(7), "nested": [np.float32(.25),
              {"flag": np.bool_(False), "text": "hello", "empty": None}]}}]
     before = deepcopy(data)
-    assert strict_loads(serialize_metadata_sample(data)) == [{"name": "点 Ä", "properties": {
-        "字段": 7, "nested": [.25, {"flag": False, "text": "hello", "empty": None}]}}]
-    assert data == before and isinstance(data[0]["properties"]["字段"], np.int64)
+    assert strict_loads(serialize_metadata_sample(data)) == [{"name": "Punkt Ä", "properties": {
+        "Attribut": 7, "nested": [.25, {"flag": False, "text": "hello", "empty": None}]}}]
+    assert data == before and isinstance(data[0]["properties"]["Attribut"], np.int64)
 
 
 def test_original_sample_sizes_and_finite_json_text_are_preserved():

@@ -63,13 +63,13 @@ def _layer_attribute_summary(layer: dict) -> str:
     return ", ".join(summaries) if summaries else "Keine Attribute erkannt"
 
 class AgentState(TypedDict):
-    """LangGraph 状态定义：自动利用 add_messages 维护 ReAct 循环中 Message 的历史状态"""
+    """LangGraph-Zustand: add_messages verwaltet den Nachrichtenverlauf der ReAct-Schleife."""
     messages: Annotated[Sequence[BaseMessage], add_messages]
     updated_show_layers: Optional[List[dict]]
 
 
 def agent_reasoner(state: AgentState, *, llm_with_tools, get_layers) -> dict:
-    """Reason 阶段：由 LLM 结合长上下文自主决定直接回答或调用工具"""
+    """Reasoning-Phase: Das LLM entscheidet anhand des Kontexts, ob es antwortet oder ein Werkzeug aufruft."""
     raw_layers, show_layers = get_layers()
     raw_summary = [f"'{l['name']}' ({l['type']}; Attribute: {_layer_attribute_summary(l)})" + (
         f" [Dataset-ID: {l['dataset_id']}]" if l.get("dataset_id") else "") for l in raw_layers]
@@ -94,7 +94,7 @@ def agent_reasoner(state: AgentState, *, llm_with_tools, get_layers) -> dict:
     6. Gib dem Nutzer nach Beendigung aller Tool-Aufrufe eine prägnante, informative Zusammenfassung auf Deutsch.
     """
 
-    # 过滤掉系统消息，在首位统一拼装最新的系统认知
+    # Systemnachrichten entfernen und den aktuellen Systemkontext an den Anfang setzen.
     user_and_assistant_msgs = [m for m in state["messages"] if not isinstance(m, SystemMessage)]
     full_messages = [SystemMessage(content=system_prompt)] + list(user_and_assistant_msgs)
 
@@ -103,7 +103,7 @@ def agent_reasoner(state: AgentState, *, llm_with_tools, get_layers) -> dict:
 
 
 def should_continue(state: AgentState):
-    """条件路由：判断 LLM 决定继续执行工具调用，还是已经结束推理给出最终答案"""
+    """Bedingte Weiterleitung: Werkzeugaufruf ausführen oder die abschließende Antwort zurückgeben."""
     last_message = state["messages"][-1]
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
         return "tools"

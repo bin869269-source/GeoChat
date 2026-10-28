@@ -88,7 +88,7 @@ def add_points_layer(m, points, layer_name, folium_kwargs=None):
     fg = folium.FeatureGroup(name=layer_name)
     bounds = []
 
-    # 兼容 GeoJSON Feature 结构或者列表格式
+    # Unterstützt GeoJSON-Features und Listenformate.
     pts_to_iterate = points.get("features", []) if isinstance(points, dict) else points
     for pt in pts_to_iterate:
         if isinstance(pt, dict) and "geometry" in pt:
